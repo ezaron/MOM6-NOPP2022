@@ -127,9 +127,9 @@ subroutine astro_longitudes_init(time_ref, longitudes)
   ! n: Longitude of ascending node
   longitudes%N = mod((259.1568 - 1934.142 * T) + 0.0021 * (T**2), 360.0) * PI / 180.0
 
-  write(mesg,'("astro_longitudes at TIDE_REF_DATE: s, h, p, n [deg] = ",F8.3," ",F8.3," ",F8.3," ",F8.3)')&
-       longitudes%s*180/PI,longitudes%h*180/PI,longitudes%p*180/PI,longitudes%N*180/PI
-  call MOM_mesg("EDZ: "//mesg)
+!  write(mesg,'("astro_longitudes at TIDE_REF_DATE: s, h, p, n [deg] = ",F8.3," ",F8.3," ",F8.3," ",F8.3)')&
+!       longitudes%s*180/PI,longitudes%h*180/PI,longitudes%p*180/PI,longitudes%N*180/PI
+!  call MOM_mesg("EDZ: "//mesg)
 
 end subroutine astro_longitudes_init
 

@@ -112,7 +112,11 @@ subroutine astro_longitudes_init(time_ref, longitudes)
   D = time_type_to_real(time_ref - set_date(1900, 1, 1)) / (24.0 * 3600.0)
   ! Time since 1900-01-01 in Julian centuries
   ! Kowalik and Luick use 36526, but Schureman uses 36525 which I think is correct.
-  T = D / 36525.0
+!  T = D / 36525.0
+  ! CORRECTION (EDZ): Kowalik and Luick appear to have used the incorrect number of days in a Julian
+  ! century in deriving the formulas below. When their incorrect value is used, the correct values
+  ! of the astronomical longitudes are computed, as verified by comparison with independent sources.
+  T = D / 36526.0
   ! Calculate longitudes, including converting to radians on [0, 2pi)
   ! s: Mean longitude of moon
   longitudes%s = mod((277.0248 + 481267.8906 * T) + 0.0011 * (T**2), 360.0) * PI / 180.0

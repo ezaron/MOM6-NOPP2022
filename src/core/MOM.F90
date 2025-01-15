@@ -95,7 +95,8 @@ use MOM_forcing_type,          only : copy_common_forcing_fields, set_derived_fo
 use MOM_forcing_type,          only : homogenize_forcing, homogenize_mech_forcing
 use MOM_grid,                  only : ocean_grid_type, MOM_grid_init, MOM_grid_end
 use MOM_grid,                  only : set_first_direction
-use MOM_harmonic_analysis,     only : HA_accum_FtF, HA_accum_FtSSH, harmonic_analysis_CS
+use MOM_harmonic_analysis,     only : HA_accum_FtF, HA_accum_FtSSH, harmonic_analysis_CS, &
+                                      HA_accum_edz, harmonic_analysis_CS_edz
 use MOM_hor_index,             only : hor_index_type, hor_index_init
 use MOM_hor_index,             only : rotate_hor_index
 use MOM_interface_heights,     only : find_eta, calc_derived_thermo, thickness_to_dz
@@ -197,6 +198,12 @@ type, public :: MOM_control_struct ; private
     h, &            !< layer thickness [H ~> m or kg m-2]
     T, &            !< potential temperature [C ~> degC]
     S               !< salinity [S ~> ppt]
+  ! EDZ: Exponentially-averaged variables, needed for computing the basic state around
+  !      which baroclinic waves are defined from perturbations.
+  real ALLOCABLE_, dimension(NIMEM_,NJMEM_,NKMEM_) :: &
+    h_, &            !< layer thickness [H ~> m or kg m-2]
+    T_, &            !< potential temperature [C ~> degC]
+    S_               !< salinity [S ~> ppt]
   real ALLOCABLE_, dimension(NIMEMB_PTR_,NJMEM_,NKMEM_) :: &
     u,  &           !< zonal velocity component [L T-1 ~> m s-1]
     uh, &           !< uh = u * h * dy at u grid points [H L2 T-1 ~> m3 s-1 or kg s-1]
@@ -392,6 +399,7 @@ type, public :: MOM_control_struct ; private
   type(MOM_dyn_split_RK2b_CS),    pointer :: dyn_split_RK2b_CSp => NULL()
     !< Pointer to the control structure used for an alternate version of the mode-split RK2 dynamics
   type(harmonic_analysis_CS),    pointer :: HA_CSp => NULL()
+  type(harmonic_analysis_CS_edz),    pointer :: HA_CSp_edz => NULL()
     !< Pointer to the control structure for harmonic analysis
   type(thickness_diffuse_CS) :: thickness_diffuse_CSp
     !< Pointer to the control structure used for the isopycnal height diffusive transport.
@@ -997,6 +1005,13 @@ subroutine step_MOM(forces_in, fluxes_in, sfc_state, Time_start, time_int_in, CS
     !===========================================================================
     ! Calculate diagnostics at the end of the time step if the state is self-consistent.
     if (MOM_state_is_synchronized(CS)) then
+
+       ! EDZ: Update exponential time-averages. Hardwire the coef for now, 1/100 timesteps.
+       !      This is a timescale which should be specified in MOM_input.
+       CS%h_(:,:,:) = 0.99*CS%h_(:,:,:) + 0.01*CS%h(:,:,:)
+       CS%T_(:,:,:) = 0.99*CS%T_(:,:,:) + 0.01*CS%T(:,:,:)
+       CS%S_(:,:,:) = 0.99*CS%S_(:,:,:) + 0.01*CS%S(:,:,:)
+
     !### Perhaps this should be if (CS%t_dyn_rel_thermo == 0.0)
       call cpu_clock_begin(id_clock_other) ; call cpu_clock_begin(id_clock_diagnostics)
       ! Diagnostics that require the complete state to be up-to-date can be calculated.
@@ -1004,7 +1019,8 @@ subroutine step_MOM(forces_in, fluxes_in, sfc_state, Time_start, time_int_in, CS
       call enable_averages(CS%t_dyn_rel_diag, Time_local, CS%diag)
       call calculate_diagnostic_fields(u, v, h, CS%uh, CS%vh, CS%tv, CS%ADp,  &
                           CS%CDp, p_surf, CS%t_dyn_rel_diag, CS%diag_pre_sync,&
-                          G, GV, US, CS%diagnostics_CSp)
+                          G, GV, US, CS%diagnostics_CSp, &
+                          CS%Time, CS%HA_CSp_edz, CS%h_)
       call post_tracer_diagnostics_at_sync(CS%Tracer_reg, h, CS%diag_pre_sync, CS%diag, G, GV, CS%t_dyn_rel_diag)
       call diag_copy_diag_to_storage(CS%diag_pre_sync, h, CS%diag)
       if (showCallTree) call callTree_waypoint("finished calculate_diagnostic_fields (step_MOM)")
@@ -1069,7 +1085,8 @@ subroutine step_MOM(forces_in, fluxes_in, sfc_state, Time_start, time_int_in, CS
     call cpu_clock_begin(id_clock_diagnostics)
     if (CS%time_in_cycle > 0.0) then
       call enable_averages(CS%time_in_cycle, Time_local, CS%diag)
-      call post_surface_dyn_diags(CS%sfc_IDs, G, CS%diag, sfc_state_diag, ssh)
+      call post_surface_dyn_diags(CS%sfc_IDs, G, CS%diag, sfc_state_diag, ssh, &
+           CS%Time, CS%HA_CSp_edz)
     endif
     if (CS%time_in_thermo_cycle > 0.0) then
       call enable_averages(CS%time_in_thermo_cycle, Time_local, CS%diag)
@@ -2706,11 +2723,20 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
   ALLOC_(CS%u(IsdB:IedB,jsd:jed,nz))   ; CS%u(:,:,:) = 0.0
   ALLOC_(CS%v(isd:ied,JsdB:JedB,nz))   ; CS%v(:,:,:) = 0.0
   ALLOC_(CS%h(isd:ied,jsd:jed,nz))     ; CS%h(:,:,:) = GV%Angstrom_H
+  ALLOC_(CS%h_(isd:ied,jsd:jed,nz))    ; CS%h_(:,:,:) = GV%Angstrom_H
   ALLOC_(CS%uh(IsdB:IedB,jsd:jed,nz))  ; CS%uh(:,:,:) = 0.0
   ALLOC_(CS%vh(isd:ied,JsdB:JedB,nz))  ; CS%vh(:,:,:) = 0.0
   if (use_temperature) then
     ALLOC_(CS%T(isd:ied,jsd:jed,nz))   ; CS%T(:,:,:) = 0.0
     ALLOC_(CS%S(isd:ied,jsd:jed,nz))   ; CS%S(:,:,:) = 0.0
+    ! EDZ: The memory allocated is in the CS struct ...
+    ALLOC_(CS%T_(isd:ied,jsd:jed,nz))  ; CS%T_(:,:,:) = 0.0
+    ALLOC_(CS%S_(isd:ied,jsd:jed,nz))  ; CS%S_(:,:,:) = 0.0
+    CS%tv%T  => CS%T  ; CS%tv%S  => CS%S
+    ! ... but the pointers need to be assigned in the tv:
+    CS%tv%T_ => CS%T_ ; CS%tv%S_ => CS%S_
+    call MOM_mesg("EDZ: (T_,S_,h_) have been allocated")
+
     CS%tv%T => CS%T ; CS%tv%S => CS%S
     if (CS%tv%T_is_conT) then
       vd_T = var_desc(name="contemp", units="Celsius", longname="Conservative Temperature", &
@@ -3259,14 +3285,14 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
   if (CS%split) then
     allocate(eta(SZI_(G),SZJ_(G)), source=0.0)
     if (CS%use_alt_split) then
-      call initialize_dyn_split_RK2b(CS%u, CS%v, CS%h, CS%tv, CS%uh, CS%vh, eta, Time, &
-              G, GV, US, param_file, diag, CS%dyn_split_RK2b_CSp, CS%HA_CSp, restart_CSp, &
+       call initialize_dyn_split_RK2b(CS%u, CS%v, CS%h, CS%tv, CS%uh, CS%vh, eta, Time, &
+            G, GV, US, param_file, diag, CS%dyn_split_RK2b_CSp, CS%HA_CSp, CS%HA_CSp_edz, restart_CSp, &
               CS%dt, CS%ADp, CS%CDp, MOM_internal_state, CS%VarMix, CS%MEKE, &
               CS%thickness_diffuse_CSp, CS%OBC, CS%update_OBC_CSp, CS%ALE_CSp, CS%set_visc_CSp, &
               CS%visc, dirs, CS%ntrunc, CS%pbv, calc_dtbt=calc_dtbt, cont_stencil=CS%cont_stencil)
     else
       call initialize_dyn_split_RK2(CS%u, CS%v, CS%h, CS%tv, CS%uh, CS%vh, eta, Time, &
-              G, GV, US, param_file, diag, CS%dyn_split_RK2_CSp, CS%HA_CSp, restart_CSp, &
+              G, GV, US, param_file, diag, CS%dyn_split_RK2_CSp, CS%HA_CSp, CS%HA_CSp_edz, restart_CSp, &
               CS%dt, CS%ADp, CS%CDp, MOM_internal_state, CS%VarMix, CS%MEKE, &
               CS%thickness_diffuse_CSp, CS%OBC, CS%update_OBC_CSp, CS%ALE_CSp, CS%set_visc_CSp, &
               CS%visc, dirs, CS%ntrunc, CS%pbv, calc_dtbt=calc_dtbt, cont_stencil=CS%cont_stencil)
@@ -3442,6 +3468,14 @@ subroutine initialize_MOM(Time, Time_init, param_file, dirs, CS, &
 
   ! initialize stochastic physics
   call stochastics_init(CS%dt_therm, CS%G, CS%GV, CS%stoch_CS, param_file, diag, Time)
+
+  !EDZ:
+  call MOM_mesg("EDZ: (T_,S_,h_) assigning initial values")
+  CS%h_(:,:,:) = CS%h(:,:,:)
+  if (use_temperature) then
+     CS%T_(:,:,:) = CS%T(:,:,:)
+     CS%S_(:,:,:) = CS%S(:,:,:)
+  end if
 
   call callTree_leave("initialize_MOM()")
   call cpu_clock_end(id_clock_init)

@@ -22,8 +22,10 @@ use MOM_domains,           only : To_North, To_East
 use MOM_EOS,               only : calculate_density, calculate_density_derivs, EOS_domain
 use MOM_EOS,               only : cons_temp_to_pot_temp, abs_saln_to_prac_saln
 use MOM_error_handler,     only : MOM_error, FATAL, WARNING
+use MOM_error_handler,     only : MOM_mesg, NOTE
 use MOM_file_parser,       only : get_param, log_version, param_file_type
 use MOM_grid,              only : ocean_grid_type
+use MOM_harmonic_analysis, only : HA_accum_edz, harmonic_analysis_CS_edz, harmonic_analysis_CS_edz
 use MOM_interface_heights, only : find_eta
 use MOM_spatial_means,     only : global_area_mean, global_layer_mean
 use MOM_spatial_means,     only : global_volume_mean, global_area_integral
@@ -103,6 +105,7 @@ type, public :: diagnostics_CS ; private
   integer :: id_sosga          = -1, id_tosga          = -1
   integer :: id_temp_layer_ave = -1, id_salt_layer_ave = -1
   integer :: id_pbo            = -1
+  integer :: id_bsl            = -1, id_bslx           = -1
   integer :: id_thkcello       = -1, id_rhoinsitu      = -1
   integer :: id_rhopot0        = -1, id_rhopot2        = -1
   integer :: id_drho_dT        = -1, id_drho_dS        = -1
@@ -160,7 +163,7 @@ end type transport_diag_IDs
 contains
 !> Diagnostics not more naturally calculated elsewhere are computed here.
 subroutine calculate_diagnostic_fields(u, v, h, uh, vh, tv, ADp, CDp, p_surf, &
-                                       dt, diag_pre_sync, G, GV, US, CS)
+                                       dt, diag_pre_sync, G, GV, US, CS, Time, HA_CSp_edz,h_)
   type(ocean_grid_type),   intent(inout) :: G    !< The ocean's grid structure.
   type(verticalGrid_type), intent(in)    :: GV   !< The ocean's vertical grid structure.
   type(unit_scale_type),   intent(in)    :: US   !< A dimensional unit scaling type
@@ -182,6 +185,7 @@ subroutine calculate_diagnostic_fields(u, v, h, uh, vh, tv, ADp, CDp, p_surf, &
                                                  !! accelerations in momentum equation.
   type(cont_diag_ptrs),    intent(in)    :: CDp  !< structure with pointers to
                                                  !! terms in continuity equation.
+  ! EDZ: Why does p_surf not have an intent declaration?
   real, dimension(:,:),    pointer       :: p_surf !< A pointer to the surface pressure [R L2 T-2 ~> Pa].
                                                  !! If p_surf is not associated, it is the same
                                                  !! as setting the surface pressure to 0.
@@ -190,6 +194,13 @@ subroutine calculate_diagnostic_fields(u, v, h, uh, vh, tv, ADp, CDp, p_surf, &
   type(diag_grid_storage), intent(in)    :: diag_pre_sync !< Target grids from previous timestep
   type(diagnostics_CS),    intent(inout) :: CS   !< Control structure returned by a
                                                  !! previous call to diagnostics_init.
+
+  ! EDZ:
+  type(time_type),optional,intent(in)    :: Time !< Current model time.
+  type(harmonic_analysis_CS_edz), pointer,   &
+       optional,            intent(inout) :: HA_CSp_edz  !< Control structure for harmonic analysis
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
+       optional,         intent(in)      :: h_   !< Mean Layer thicknesses [H ~> m or kg m-2].
 
   ! Local variables
   real, dimension(SZI_(G),SZJ_(G),SZK_(G))  :: uv  ! u x v at h-points          [L2 T-2 ~> m2 s-2]
@@ -488,7 +499,13 @@ subroutine calculate_diagnostic_fields(u, v, h, uh, vh, tv, ADp, CDp, p_surf, &
     call post_data(CS%id_salt_layer_ave, salt_layer_ave, CS%diag)
   endif
 
-  call calculate_vertical_integrals(h, tv, p_surf, G, GV, US, CS)
+  if (present(Time)) then
+     if (.not.present(h_)) call MOM_error(FATAL, &
+         "MOM_diagnostics.F90 : all optional arguments must be provided")
+     call calculate_vertical_integrals(h, tv, p_surf, G, GV, US, CS, Time, HA_CSp_edz,h_)
+  else
+     call calculate_vertical_integrals(h, tv, p_surf, G, GV, US, CS)
+  end if
 
   if ((CS%id_Rml > 0) .or. (CS%id_Rcv > 0) .or. (CS%id_h_Rlay > 0) .or. &
       (CS%id_uh_Rlay > 0) .or. (CS%id_vh_Rlay > 0) .or. &
@@ -816,7 +833,8 @@ end subroutine find_weights
 !> This subroutine calculates vertical integrals of several tracers, along
 !! with the mass-weight of these tracers, the total column mass, and the
 !! carefully calculated column height.
-subroutine calculate_vertical_integrals(h, tv, p_surf, G, GV, US, CS)
+
+subroutine calculate_vertical_integrals(h, tv, p_surf, G, GV, US, CS, Time, HA_CSp_edz, h_)
   type(ocean_grid_type),   intent(inout) :: G    !< The ocean's grid structure.
   type(verticalGrid_type), intent(in)    :: GV   !< The ocean's vertical grid structure.
   type(unit_scale_type),   intent(in)    :: US   !< A dimensional unit scaling type
@@ -829,7 +847,15 @@ subroutine calculate_vertical_integrals(h, tv, p_surf, G, GV, US, CS)
                                                  !! as setting the surface pressure to 0.
   type(diagnostics_CS),    intent(inout) :: CS   !< Control structure returned by a
                                                  !! previous call to diagnostics_init.
+  ! EDZ:
+  type(time_type),optional, intent(in)    :: Time !< Current model time.
+  type(harmonic_analysis_CS_edz), pointer,   &
+       optional,            intent(inout) :: HA_CSp_edz  !< Control structure for harmonic analysis
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)), &
+       optional,         intent(in)      :: h_   !< Mean Layer thicknesses [H ~> m or kg m-2].
 
+  real, dimension(SZI_(G),SZJ_(G),SZK_(GV)+1) :: eta, eta_ ! 3D layer heights [Z -> m] 
+  
   real, dimension(SZI_(G),SZJ_(G)) :: &
     z_top, &  ! Height of the top of a layer or the ocean [Z ~> m].
     z_bot, &  ! Height of the bottom of a layer (for id_mass) or the
@@ -842,11 +868,18 @@ subroutine calculate_vertical_integrals(h, tv, p_surf, G, GV, US, CS)
               ! This is the column mass multiplied by gravity plus the pressure
               ! at the ocean surface [R L2 T-2 ~> Pa].
     dpress, & ! Change in hydrostatic pressure across a layer [R L2 T-2 ~> Pa].
+    intz_dpa, & ! Integral of Change in hydrostatic pressure across a layer [R L2 T-2 ~> Pa].
     tr_int    ! vertical integral of a tracer times density,
               ! (Rho_0 in a Boussinesq model) [Conc R Z ~> Conc kg m-2].
-  real    :: IG_Earth  ! Inverse of gravitational acceleration [T2 Z L-2 ~> s2 m-1].
 
+  real    :: dz   ! EDZ: Distance between vertical levels for computing dT_/dz and dS_/dz
+  real    :: dzp  !      Depth perturbation for interpolating T(eta) = T_(eta_) + dT_/dz*dzp
+  real    :: drho, drho_dT, drho_dS, Z_to_pres, r, Tx_, Sx_, rhox, rhox_
+
+  real    :: IG_Earth  ! Inverse of gravitational acceleration [T2 Z L-2 ~> s2 m-1].
   integer :: i, j, k, is, ie, js, je, nz
+  character(len=255) :: mesg
+  
   is = G%isc ; ie = G%iec ; js = G%jsc ; je = G%jec ; nz = GV%ke
 
   if (CS%id_mass_wt > 0) then
@@ -929,6 +962,195 @@ subroutine calculate_vertical_integrals(h, tv, p_surf, G, GV, US, CS)
     endif
   endif
 
+  ! EDZ:
+  ! Here we compute the BSL diagnostics and call HA.
+  ! We want to call HA every time the state is synchronized, which is
+  ! also when the diagnostic routine is called. But we don't want to
+  ! post the output diagnistics every time.
+  ! Hence, we compute the BSL diagnostics and call HA_accum here, but
+  ! the call to post_data (for time-series output) is only triggered
+  ! if CS%id_bsl > 0.
+  ! I don't understand how the code implements the diagnostic output timestep
+  ! which is specificed in diag_table. This might all occur inside
+  ! post_data, or it might be turning on and off the id_bsl flag.
+
+  if (present(h_)) then
+     ! For some reason none of this works with restart!
+
+  do j=js,je ; do i=is,ie ; mass(i,j) = 0.0 ; enddo ; enddo      ! Pressure at the bottom of level k.
+  do j=js,je ; do i=is,ie ; btm_pres(i,j) = 0.0 ; enddo ; enddo ! Vertical integral of pressure through level k
+ ! This is non-dilated surface height:
+     call find_eta(h, tv, G, GV, US, eta)
+     call HA_accum_edz("eta",eta(:,:,1),Time,G,HA_CSp_edz)
+  ! Used as scratch: reciprocal of Rho0*g
+  IG_Earth = 1.0 / ( GV%g_Earth * GV%Rho0 )
+  if (GV%Boussinesq) then
+     !        print *,"EDZ: 001a" Yes, this path is taken
+     if (associated(tv%eqn_of_state)) then
+        !           print *,"EDZ: 002a" Not taken in NeverWorld2
+        ! Compute pressure using int_density_dz
+        do k=1,nz
+           if (k==1) then
+              do j=G%jscB,G%jecB+1 ; do i=G%iscB,G%iecB+1
+                 z_top(i,j) = eta(i,j,1)
+                 z_bot(i,j) = z_top(i,j) - GV%H_to_Z*h(i,j,k)
+              enddo; enddo
+           else
+              do j=G%jscB,G%jecB+1 ; do i=G%iscB,G%iecB+1
+                 z_top(i,j) = z_bot(i,j)
+                 z_bot(i,j) = z_top(i,j) - GV%H_to_Z*h(i,j,k)
+              enddo; enddo
+           end if
+           call int_density_dz(tv%T(:,:,k), tv%S(:,:,k), z_top, z_bot, GV%Rho0, GV%Rho0, GV%g_Earth, &
+                G%HI, tv%eqn_of_state, US, dpress, intz_dpa)
+           do j=js,je ; do i=is,ie
+              ! btm_pres is used as scratch. It is the vertical integral of pressure.
+              btm_pres(i,j) = btm_pres(i,j) + GV%H_to_Z*h(i,j,k)*mass(i,j) + intz_dpa(i,j)
+              ! mass is being used as scratch. It is pressure.
+              mass(i,j) = mass(i,j) + dpress(i,j)
+           enddo; enddo
+        enddo
+        do j=js,je ; do i=is,ie
+           btm_pres(i,j) = btm_pres(i,j)*IG_Earth/(eta(i,j,1)-z_bot(i,j))
+        enddo; enddo
+        call HA_accum_edz("bslx",btm_pres,Time,G,HA_CSp_edz)
+        if (CS%id_bslx> 0) call post_data(CS%id_bslx, btm_pres, CS%diag)
+
+        ! My code used this, but this is actually the layer thickness
+        ! computed from h_ and (T,S), not (h_,T_,S_) as intended.
+        call find_eta(h_, tv, G, GV, US, eta_)
+        ! eta is the interface height relative to MSL (0).
+        ! At k=nz+1 we have eta(i,j,k) = -G%bathyT(i,j).
+
+        do j=js,je ; do i=is,ie
+           z_top(i,j) = 0.0 ! Start at p=0 Pa at surface
+           ! Initialize scratch variables:
+           ! mass is pressure anom at the bottom of layer k:
+           mass(i,j) = 0.0
+           ! btm_pres is vertical integral of pressure anomaly
+           btm_pres(i,j) = 0.0
+        end do; end do
+        ! Compute dRho = drho_dT*dT + drho_dS*dS:
+        k=1
+        do j=js,je ; do i=is,ie
+           ! Compute density derivatives
+           z_top(i,j) =  z_top(i,j) + 0.5 * h_(i,j,k) * Z_to_pres ! Pressure in middle of layer k
+           call calculate_density_derivs(tv%T_(i,j,k), tv%S_(i,j,k),  z_top(i,j), &
+                drho_dT, drho_dS,tv%eqn_of_state)
+           z_top(i,j) =  z_top(i,j) + 0.5 * h_(i,j,k) * Z_to_pres ! Pressure at bottom of layer k
+           ! dZ at the middle of each layer:
+           ! eta is z relative to MSL, thus negative. Therefore we need to
+           ! subtract level thickness h:
+           dzp = eta(i,j,k) - eta_(i,j,k) - 0.5*(h(i,j,k) - h_(i,j,k))
+           ! dz, the increment used for computing dT_/dz and dS_/dz:
+           ! Level k+1 is below level k, so this is negative of delta-z:
+           dz  = 0.5*(h_(i,j,k+1) + h_(i,j,k  ))
+           r = dzp/dz
+           drho = 0.0
+           ! Without this conditional, then many regions are NaN, presumably due to floating
+           ! point overflow associated with 1/dz in infinitesimal layers.
+           if (abs(r) < 10.0) then
+              ! dRHO = drho_dT*dT + drho_dS*dS:
+              drho = drho_dT*( tv%T(i,j,k) - ( tv%T_(i,j,k) - (tv%T_(i,j,k+1) - tv%T_(i,j,k  ))*r ) )&
+                   + drho_dS*( tv%S(i,j,k) - ( tv%S_(i,j,k) - (tv%S_(i,j,k+1) - tv%S_(i,j,k  ))*r ) )
+           end if
+           mass(i,j) = drho*h(i,j,k)*0.5
+           btm_pres(i,j) = mass(i,j)*h(i,j,k)
+           mass(i,j) = mass(i,j) + drho*h(i,j,k)*0.5
+        end do; end do
+        
+        do k=2,nz-1 ; do j=js,je ; do i=is,ie
+           ! Compute density derivatives
+           z_top(i,j) =  z_top(i,j) + 0.5 * h_(i,j,k) * Z_to_pres ! Pressure in middle of layer k
+           call calculate_density_derivs(tv%T_(i,j,k), tv%S_(i,j,k),  z_top(i,j), &
+                drho_dT, drho_dS,tv%eqn_of_state)
+           z_top(i,j) =  z_top(i,j) + 0.5 * h_(i,j,k) * Z_to_pres ! Pressure at bottom of layer k
+           ! dZ at the middle of each layer:
+           dzp = eta(i,j,k) - eta_(i,j,k) - 0.5*(h(i,j,k) - h_(i,j,k))
+           drho = 0.0
+           if (dzp > 0.0) then
+              ! dz, the increment used for computing dT_/dz and dS_/dz:
+              dz  = 0.5*(h_(i,j,k) + h_(i,j,k-1))
+              r = dzp/dz
+              ! dRHO = drho_dT*dT + drho_dS*dS:
+              if (abs(r) < 10.0) &
+                   drho = drho_dT*( tv%T(i,j,k) - ( tv%T_(i,j,k) - (tv%T_(i,j,k) - tv%T_(i,j,k-1))*r ) )&
+                   + drho_dS*( tv%S(i,j,k) - ( tv%S_(i,j,k) - (tv%S_(i,j,k) - tv%S_(i,j,k-1))*r ) )
+           else ! dzp <= 0.0
+              dz  = 0.5*(h_(i,j,k+1) + h_(i,j,k))
+              r = dzp/dz
+              ! dRHO = drho_dT*dT + drho_dS*dS:
+              if (abs(r) < 10.0) &
+                   drho = drho_dT*( tv%T(i,j,k) - ( tv%T_(i,j,k) - (tv%T_(i,j,k+1) - tv%T_(i,j,k))*r ) )&
+                   + drho_dS*( tv%S(i,j,k) - ( tv%S_(i,j,k) - (tv%S_(i,j,k+1) - tv%S_(i,j,k))*r ) )
+           endif! if dzp
+           mass(i,j) = mass(i,j) + drho*h(i,j,k)*0.5
+           btm_pres(i,j) = btm_pres(i,j) + mass(i,j)*h(i,j,k)
+           mass(i,j) = mass(i,j) + drho*h(i,j,k)*0.5
+        end do; end do ; end do
+        
+     k=nz
+     do j=js,je ; do i=is,ie
+        ! Compute density derivatives
+        z_top(i,j) =  z_top(i,j) + 0.5 * h_(i,j,k) * Z_to_pres ! Pressure in middle of layer k
+        call calculate_density_derivs(tv%T_(i,j,k), tv%S_(i,j,k),  z_top(i,j), &
+             drho_dT, drho_dS,tv%eqn_of_state)
+        z_top(i,j) =  z_top(i,j) + 0.5 * h_(i,j,k) * Z_to_pres ! Pressure at bottom of layer k
+        ! dZ at the middle of each layer:
+        dzp = eta(i,j,k) - eta_(i,j,k) - 0.5*(h(i,j,k) - h_(i,j,k))
+        ! dz, the increment used for computing dT_/dz and dS_/dz:
+        dz  = 0.5*(h_(i,j,k  ) + h_(i,j,k-1))
+        r = dzp/dz
+        drho = 0.0
+        if (abs(r) < 10.0) then
+           ! dRHO = drho_dT*dT + drho_dS*dS:
+           drho = drho_dT*( tv%T(i,j,k) - ( tv%T_(i,j,k) - (tv%T_(i,j,k  ) - tv%T_(i,j,k-1))*r ) )&
+                + drho_dS*( tv%S(i,j,k) - ( tv%S_(i,j,k) - (tv%S_(i,j,k  ) - tv%S_(i,j,k-1))*r ) )
+        endif
+        mass(i,j) = mass(i,j) + drho*h(i,j,k)*0.5
+        btm_pres(i,j) = btm_pres(i,j) + mass(i,j)*h(i,j,k)
+        ! Vertical average of the pressure:
+        btm_pres(i,j) = btm_pres(i,j)/(eta(i,j,1) - eta(i,j,nz+1))/GV%Rho0
+     end do; end do
+     call HA_accum_edz("bsl",btm_pres,Time,G,HA_CSp_edz)
+
+     if (CS%id_bsl > 0) call post_data(CS%id_bsl , btm_pres, CS%diag)
+
+  else ! Code below is: Yes, boussinesq, No tv%EOS
+     !        print *,"EDZ: 002b" Yes taken in NeverWorld2
+
+     ! Do the computation the way I think it should be done:
+     ! find_eta is in src/core/MOM_interface_heights.F90
+     call find_eta(h, tv, G, GV, US, z_top)
+     do j=js,je ; do i=is,ie
+        mass(i,j) = 0.0
+        btm_pres(i,j) = 0.0
+        z_bot(i,j) = z_top(i,j) ! put free surface here for later
+        ! The k=0 term:
+        mass(i,j) = (GV%g_prime(1)*GV%H_to_Z) * (z_top(i,j) + G%bathyT(i,j))
+        btm_pres(i,j) = btm_pres(i,j) - mass(i,j)*z_top(i,j)
+     enddo; enddo
+     do k=1,nz-1 ; do j=js,je ; do i=is,ie
+        z_top(i,j) = z_top(i,j) - h(i,j,k)
+        mass(i,j) = (GV%g_prime(K+1)*GV%H_to_Z) * (z_top(i,j) + G%bathyT(i,j))
+        btm_pres(i,j) = btm_pres(i,j) - mass(i,j)*z_top(i,j)
+     enddo; enddo ; enddo
+     do j=js,je ; do i=is,ie
+        btm_pres(i,j) = btm_pres(i,j)/GV%g_Earth/((z_bot(i,j) + G%bathyT(i,j)) + GV%H_subroundoff*GV%H_to_Z)
+     enddo; enddo
+
+     ! EDZ: I don't know what the last two arguments are supposed to be:
+!     call HA_accum_edz("bsl",btm_pres,Time,US)
+     if (CS%id_bsl > 0) call post_data(CS%id_bsl, btm_pres, CS%diag)
+     ! Do the vertical pressure integrals work correctly when we use
+     ! stacked shallow water layers?
+  endif
+else ! NOT (GV%Boussinesq) then
+   !      print *,"EDZ: 001b" Not taken in NeverWorld2
+   ! I'm not confident in the non-BOUSSINESQ integral!
+endif
+endif ! present(h_)
+  
 end subroutine calculate_vertical_integrals
 
 !> This subroutine calculates terms in the mechanical energy budget.
@@ -1271,7 +1493,7 @@ end subroutine calculate_derivs
 !> This routine posts diagnostics of various dynamic ocean surface quantities,
 !! including velocities, speed and sea surface height, at the time the ocean
 !! state is reported back to the caller
-subroutine post_surface_dyn_diags(IDs, G, diag, sfc_state, ssh)
+subroutine post_surface_dyn_diags(IDs, G, diag, sfc_state, ssh, Time, HA_CSp_edz)
   type(surface_diag_IDs),   intent(in) :: IDs !< A structure with the diagnostic IDs.
   type(ocean_grid_type),    intent(in) :: G   !< ocean grid structure
   type(diag_ctrl),          intent(in) :: diag !< regulates diagnostic output
@@ -1279,6 +1501,10 @@ subroutine post_surface_dyn_diags(IDs, G, diag, sfc_state, ssh)
   real, dimension(SZI_(G),SZJ_(G)), &
                             intent(in) :: ssh !< Time mean surface height without corrections
                                               !! for ice displacement [Z ~> m]
+  ! EDZ:
+  type(time_type),optional, intent(in)    :: Time !< Current model time.
+  type(harmonic_analysis_CS_edz), pointer,   &
+       optional,            intent(inout) :: HA_CSp_edz  !< Control structure for harmonic analysis
 
   ! Local variables
   real, dimension(SZI_(G),SZJ_(G)) :: speed  ! The surface speed [L T-1 ~> m s-1]
@@ -1291,9 +1517,13 @@ subroutine post_surface_dyn_diags(IDs, G, diag, sfc_state, ssh)
   if (IDs%id_ssh > 0) &
     call post_data(IDs%id_ssh, ssh, diag, mask=G%mask2dT)
 
+  if (present(Time)) call HA_accum_edz("ssu",sfc_state%u,Time,G,HA_CSp_edz)
   if (IDs%id_ssu > 0) &
     call post_data(IDs%id_ssu, sfc_state%u, diag, mask=G%mask2dCu)
 
+  ! EDZ: I should absorb Time and G into my HA_CSp_edz so that I can just pass
+  !      one structure through the interfaces.
+  if (present(Time)) call HA_accum_edz("ssv",sfc_state%v,Time,G,HA_CSp_edz)
   if (IDs%id_ssv > 0) &
     call post_data(IDs%id_ssv, sfc_state%v, diag, mask=G%mask2dCv)
 
@@ -1895,6 +2125,16 @@ subroutine MOM_diagnostics_init(MIS, ADp, CDp, Time, G, GV, US, param_file, diag
   CS%id_pbo = register_diag_field('ocean_model', 'pbo', diag%axesT1, Time, &
       long_name='Sea Water Pressure at Sea Floor', standard_name='sea_water_pressure_at_sea_floor', &
       units='Pa', conversion=US%RL2_T2_to_Pa)
+
+  ! Baroclinic sea level computed using low-order quadrature and the
+  ! mean barckground profile:
+  CS%id_bsl = register_diag_field('ocean_model', 'bsl', diag%axesT1, Time, &
+      long_name='Baroclinic Sea Level', standard_name='baroclinic_sea_level', &
+      units='m', conversion=US%Z_to_m)
+  ! Baroclinic sea level computed using MOM_density_integrals:
+  CS%id_bslx= register_diag_field('ocean_model', 'bslx', diag%axesT1, Time, &
+      long_name='Baroclinic Sea Levelx', standard_name='baroclinic_sea_levelx', &
+      units='m', conversion=US%Z_to_m)
 
   ! Register time derivatives and allocate memory for diagnostics that need
   ! access from across several modules.

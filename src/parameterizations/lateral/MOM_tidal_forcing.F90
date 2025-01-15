@@ -10,7 +10,7 @@ use MOM_error_handler, only : MOM_error, MOM_mesg, FATAL, WARNING
 use MOM_file_parser,   only : get_param, log_version, param_file_type
 use MOM_grid,          only : ocean_grid_type
 use MOM_harmonic_analysis, &
-                       only : HA_init, HA_register, harmonic_analysis_CS &
+                       only : HA_init, HA_register, harmonic_analysis_CS, &
                        HA_init_edz, HA_register_edz, harmonic_analysis_CS_edz
 use MOM_io,            only : field_exists, file_exists, MOM_read_data
 use MOM_time_manager,  only : set_date, time_type, time_type_to_real, operator(-)

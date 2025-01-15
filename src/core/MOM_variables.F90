@@ -77,6 +77,9 @@ type, public :: thermo_var_ptrs
   ! If allocated, the following variables have nz layers.
   real, pointer :: T(:,:,:) => NULL() !< Potential temperature [C ~> degC].
   real, pointer :: S(:,:,:) => NULL() !< Salinity [PSU] or [gSalt/kg], generically [S ~> ppt].
+  ! EDZ: time-averages
+  real, pointer :: T_(:,:,:) => NULL() !< Potential temperature [C ~> degC].
+  real, pointer :: S_(:,:,:) => NULL() !< Salinity [PSU] or [gSalt/kg], generically [S ~> ppt].
   real, pointer :: p_surf(:,:) => NULL() !< Ocean surface pressure used in equation of state
                          !! calculations [R L2 T-2 ~> Pa]
   type(EOS_type), pointer :: eqn_of_state => NULL() !< Type that indicates the
@@ -323,6 +326,7 @@ type, public :: BT_cont_type
 end type BT_cont_type
 
 !> Container for grids modifying cell metric at porous barriers
+! TODO: rename porous_barrier_type to porous_barrier_type
 type, public :: porous_barrier_type
   ! Each of the following fields has nz layers.
   real, allocatable :: por_face_areaU(:,:,:) !< fractional open area of U-faces [nondim]

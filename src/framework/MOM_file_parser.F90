@@ -8,7 +8,7 @@ use MOM_coms, only : any_across_PEs
 use MOM_error_handler, only : MOM_error, FATAL, WARNING, MOM_mesg, assert
 use MOM_error_handler, only : is_root_pe, stdlog, stdout
 use MOM_time_manager, only : get_time, time_type, get_ticks_per_second
-use MOM_time_manager, only : set_date, get_date, real_to_time, operator(-), operator(==), set_time
+use MOM_time_manager, only : set_date, get_date, real_to_time, operator(-), set_time
 use MOM_document, only : doc_param, doc_module, doc_init, doc_end, doc_type
 use MOM_document, only : doc_openBlock, doc_closeBlock
 use MOM_string_functions, only : left_int, left_ints, slasher
@@ -618,7 +618,7 @@ function simplifyWhiteSpace(string)
 end function simplifyWhiteSpace
 
 !> This subroutine reads the value of an integer model parameter from a parameter file.
-subroutine read_param_int(CS, varname, value, fail_if_missing, set)
+subroutine read_param_int(CS, varname, value, fail_if_missing)
   type(param_file_type),  intent(in) :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),       intent(in) :: varname !< The case-sensitive name of the parameter to read
@@ -626,8 +626,6 @@ subroutine read_param_int(CS, varname, value, fail_if_missing, set)
                                          !! read from the parameter file
   logical,      optional, intent(in) :: fail_if_missing !< If present and true, a fatal error occurs
                                          !! if this variable is not found in the parameter file
-  logical,     optional, intent(out) :: set     !< If present, this indicates whether this parameter
-                                         !! has been found and successfully set in the input files.
   ! Local variables
   character(len=CS%max_line_len) :: value_string(1)
   logical            :: found, defined
@@ -635,7 +633,6 @@ subroutine read_param_int(CS, varname, value, fail_if_missing, set)
   call get_variable_line(CS, varname, found, defined, value_string)
   if (found .and. defined .and. (LEN_TRIM(value_string(1)) > 0)) then
     read(value_string(1),*,err = 1001) value
-    if (present(set)) set = .true.
   else
     if (present(fail_if_missing)) then ; if (fail_if_missing) then
       if (.not.found) then
@@ -646,7 +643,6 @@ subroutine read_param_int(CS, varname, value, fail_if_missing, set)
                              ' found but not set in input files.')
       endif
     endif ; endif
-    if (present(set)) set = .false.
   endif
   return
  1001 call MOM_error(FATAL,'read_param_int: read error for integer variable '//trim(varname)// &
@@ -654,7 +650,7 @@ subroutine read_param_int(CS, varname, value, fail_if_missing, set)
 end subroutine read_param_int
 
 !> This subroutine reads the values of an array of integer model parameters from a parameter file.
-subroutine read_param_int_array(CS, varname, value, fail_if_missing, set)
+subroutine read_param_int_array(CS, varname, value, fail_if_missing)
   type(param_file_type),  intent(in) :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),       intent(in) :: varname !< The case-sensitive name of the parameter to read
@@ -662,15 +658,12 @@ subroutine read_param_int_array(CS, varname, value, fail_if_missing, set)
                                          !! read from the parameter file
   logical,      optional, intent(in) :: fail_if_missing !< If present and true, a fatal error occurs
                                          !! if this variable is not found in the parameter file
-  logical,     optional, intent(out) :: set     !< If present, this indicates whether this parameter
-                                         !! has been found and successfully set in the input files.
   ! Local variables
   character(len=CS%max_line_len) :: value_string(1)
   logical            :: found, defined
 
   call get_variable_line(CS, varname, found, defined, value_string)
   if (found .and. defined .and. (LEN_TRIM(value_string(1)) > 0)) then
-    if (present(set)) set = .true.
     read(value_string(1),*,end=991,err=1002) value
  991 return
   else
@@ -683,7 +676,6 @@ subroutine read_param_int_array(CS, varname, value, fail_if_missing, set)
                              ' found but not set in input files.')
       endif
     endif ; endif
-    if (present(set)) set = .false.
   endif
   return
  1002 call MOM_error(FATAL,'read_param_int_array: read error for integer array '//trim(varname)// &
@@ -691,7 +683,7 @@ subroutine read_param_int_array(CS, varname, value, fail_if_missing, set)
 end subroutine read_param_int_array
 
 !> This subroutine reads the value of a real model parameter from a parameter file.
-subroutine read_param_real(CS, varname, value, fail_if_missing, scale, set)
+subroutine read_param_real(CS, varname, value, fail_if_missing, scale)
   type(param_file_type), intent(in) :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),      intent(in) :: varname !< The case-sensitive name of the parameter to read
@@ -701,8 +693,6 @@ subroutine read_param_real(CS, varname, value, fail_if_missing, scale, set)
                                          !! if this variable is not found in the parameter file
   real,        optional, intent(in) :: scale   !< A scaling factor that the parameter is multiplied
                                          !! by before it is returned.
-  logical,     optional, intent(out) :: set    !< If present, this indicates whether this parameter
-                                         !! has been found and successfully set in the input files.
 
   ! Local variables
   character(len=CS%max_line_len) :: value_string(1)
@@ -712,7 +702,6 @@ subroutine read_param_real(CS, varname, value, fail_if_missing, scale, set)
   if (found .and. defined .and. (LEN_TRIM(value_string(1)) > 0)) then
     read(value_string(1),*,err=1003) value
     if (present(scale)) value = scale*value
-    if (present(set)) set = .true.
   else
     if (present(fail_if_missing)) then ; if (fail_if_missing) then
       if (.not.found) then
@@ -723,7 +712,6 @@ subroutine read_param_real(CS, varname, value, fail_if_missing, scale, set)
                              ' found but not set in input files.')
       endif
     endif ; endif
-    if (present(set)) set = .false.
   endif
   return
  1003 call MOM_error(FATAL,'read_param_real: read error for real variable '//trim(varname)// &
@@ -731,7 +719,7 @@ subroutine read_param_real(CS, varname, value, fail_if_missing, scale, set)
 end subroutine read_param_real
 
 !> This subroutine reads the values of an array of real model parameters from a parameter file.
-subroutine read_param_real_array(CS, varname, value, fail_if_missing, scale, set)
+subroutine read_param_real_array(CS, varname, value, fail_if_missing, scale)
   type(param_file_type), intent(in) :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),      intent(in) :: varname !< The case-sensitive name of the parameter to read
@@ -741,8 +729,6 @@ subroutine read_param_real_array(CS, varname, value, fail_if_missing, scale, set
                                          !! if this variable is not found in the parameter file
   real,        optional, intent(in) :: scale   !< A scaling factor that the parameter is multiplied
                                          !! by before it is returned.
-  logical,     optional, intent(out) :: set    !< If present, this indicates whether this parameter
-                                         !! has been found and successfully set in the input files.
 
   ! Local variables
   character(len=CS%max_line_len) :: value_string(1)
@@ -753,7 +739,7 @@ subroutine read_param_real_array(CS, varname, value, fail_if_missing, scale, set
     read(value_string(1),*,end=991,err=1004) value
 991 continue
     if (present(scale)) value(:) = scale*value(:)
-    if (present(set)) set = .true.
+    return
   else
     if (present(fail_if_missing)) then ; if (fail_if_missing) then
       if (.not.found) then
@@ -764,7 +750,6 @@ subroutine read_param_real_array(CS, varname, value, fail_if_missing, scale, set
                              ' found but not set in input files.')
       endif
     endif ; endif
-    if (present(set)) set = .false.
   endif
   return
  1004 call MOM_error(FATAL,'read_param_real_array: read error for real array '//trim(varname)// &
@@ -772,7 +757,7 @@ subroutine read_param_real_array(CS, varname, value, fail_if_missing, scale, set
 end subroutine read_param_real_array
 
 !> This subroutine reads the value of a character string model parameter from a parameter file.
-subroutine read_param_char(CS, varname, value, fail_if_missing, set)
+subroutine read_param_char(CS, varname, value, fail_if_missing)
   type(param_file_type),  intent(in) :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),       intent(in) :: varname !< The case-sensitive name of the parameter to read
@@ -780,8 +765,6 @@ subroutine read_param_char(CS, varname, value, fail_if_missing, set)
                                          !! read from the parameter file
   logical,      optional, intent(in) :: fail_if_missing !< If present and true, a fatal error occurs
                                          !! if this variable is not found in the parameter file
-  logical,     optional, intent(out) :: set     !< If present, this indicates whether this parameter
-                                         !! has been found and successfully set in the input files.
   ! Local variables
   character(len=CS%max_line_len) :: value_string(1)
   logical            :: found, defined
@@ -793,12 +776,10 @@ subroutine read_param_char(CS, varname, value, fail_if_missing, set)
     call MOM_error(FATAL, 'Unable to find variable '//trim(varname)//' in any input files.')
   endif ; endif
 
-  if (present(set)) set = found
-
 end subroutine read_param_char
 
 !> This subroutine reads the values of an array of character string model parameters from a parameter file.
-subroutine read_param_char_array(CS, varname, value, fail_if_missing, set)
+subroutine read_param_char_array(CS, varname, value, fail_if_missing)
   type(param_file_type),  intent(in) :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),       intent(in) :: varname !< The case-sensitive name of the parameter to read
@@ -806,8 +787,6 @@ subroutine read_param_char_array(CS, varname, value, fail_if_missing, set)
                                          !! read from the parameter file
   logical,      optional, intent(in) :: fail_if_missing !< If present and true, a fatal error occurs
                                          !! if this variable is not found in the parameter file
-  logical,     optional, intent(out) :: set     !< If present, this indicates whether this parameter
-                                         !! has been found and successfully set in the input files.
 
   ! Local variables
   character(len=CS%max_line_len) :: value_string(1), loc_string
@@ -834,12 +813,10 @@ subroutine read_param_char_array(CS, varname, value, fail_if_missing, set)
     call MOM_error(FATAL, 'Unable to find variable '//trim(varname)//' in any input files.')
   endif ; endif
 
-  if (present(set)) set = found
-
 end subroutine read_param_char_array
 
 !> This subroutine reads the value of a logical model parameter from a parameter file.
-subroutine read_param_logical(CS, varname, value, fail_if_missing, set)
+subroutine read_param_logical(CS, varname, value, fail_if_missing)
   type(param_file_type),  intent(in) :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),       intent(in) :: varname !< The case-sensitive name of the parameter to read
@@ -847,8 +824,6 @@ subroutine read_param_logical(CS, varname, value, fail_if_missing, set)
                                          !! read from the parameter file
   logical,      optional, intent(in) :: fail_if_missing !< If present and true, a fatal error occurs
                                          !! if this variable is not found in the parameter file
-  logical,     optional, intent(out) :: set     !< If present, this indicates whether this parameter
-                                         !! has been found and successfully set in the input files.
 
   ! Local variables
   character(len=CS%max_line_len) :: value_string(1)
@@ -860,13 +835,10 @@ subroutine read_param_logical(CS, varname, value, fail_if_missing, set)
   elseif (present(fail_if_missing)) then ; if (fail_if_missing) then
     call MOM_error(FATAL, 'Unable to find variable '//trim(varname)//' in any input files.')
   endif ; endif
-
-  if (present(set)) set = found
-
 end subroutine read_param_logical
 
 !> This subroutine reads the value of a time_type model parameter from a parameter file.
-subroutine read_param_time(CS, varname, value, timeunit, fail_if_missing, date_format, set)
+subroutine read_param_time(CS, varname, value, timeunit, fail_if_missing, date_format)
   type(param_file_type),  intent(in) :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),       intent(in) :: varname !< The case-sensitive name of the parameter to read
@@ -878,8 +850,6 @@ subroutine read_param_time(CS, varname, value, timeunit, fail_if_missing, date_f
   logical,     optional, intent(out) :: date_format !< If present, this indicates whether this
                                          !! parameter was read in a date format, so that it can
                                          !! later be logged in the same format.
-  logical,     optional, intent(out) :: set     !< If present, this indicates whether this parameter
-                                         !! has been found and successfully set in the input files.
 
   ! Local variables
   character(len=CS%max_line_len) :: value_string(1)
@@ -921,7 +891,6 @@ subroutine read_param_time(CS, varname, value, timeunit, fail_if_missing, date_f
       read( value_string(1), *) real_time
       value = real_to_time(real_time*time_unit)
     endif
-    if (present(set)) set = .true.
   else
     if (present(fail_if_missing)) then ; if (fail_if_missing) then
       if (.not.found) then
@@ -930,7 +899,6 @@ subroutine read_param_time(CS, varname, value, timeunit, fail_if_missing, date_f
         call MOM_error(FATAL, 'Variable '//trim(varname)//' found but not set in input files.')
       endif
     endif ; endif
-    if (present(set)) set = .false.
   endif
   return
 
@@ -1736,7 +1704,7 @@ end function convert_date_to_string
 !! and logs it in documentation files.
 subroutine get_param_int(CS, modulename, varname, value, desc, units, &
                default, fail_if_missing, do_not_read, do_not_log, &
-               layoutParam, debuggingParam, old_name)
+               layoutParam, debuggingParam)
   type(param_file_type),      intent(in)    :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),           intent(in)    :: modulename !< The name of the calling module
@@ -1757,37 +1725,15 @@ subroutine get_param_int(CS, modulename, varname, value, desc, units, &
                                          !! logged in the layout parameter file
   logical,          optional, intent(in)    :: debuggingParam !< If present and true, this parameter is
                                          !! logged in the debugging parameter file
-  character(len=*), optional, intent(in)    :: old_name !< A case-sensitive archaic name of the parameter
-                                         !! to read.  Errors or warnings are issued if the old name
-                                         !! is being used.
 
-  ! Local variables
   logical :: do_read, do_log
-  logical :: new_name_used, old_name_used, same_value
-  integer :: new_name_value  ! The value that is set when the standard name is used.
 
   do_read = .true. ; if (present(do_not_read)) do_read = .not.do_not_read
   do_log  = .true. ; if (present(do_not_log))  do_log  = .not.do_not_log
 
   if (do_read) then
     if (present(default)) value = default
-
-    old_name_used = .false.
-    if (present(old_name)) then
-      new_name_value = value
-      call read_param_int(CS, old_name, value, set=old_name_used)
-      if (old_name_used) then
-        call read_param_int(CS, varname, new_name_value, set=new_name_used)
-
-        ! Issue appropriate warnings or error messages.
-        same_value = (value == new_name_value)
-        call archaic_param_name_message(varname, old_name, new_name_used, same_value)
-      endif
-    endif
-
-    if (.not.old_name_used) then ! Old name is either not present or not set.
-      call read_param_int(CS, varname, value, fail_if_missing)
-    endif
+    call read_param_int(CS, varname, value, fail_if_missing)
   endif
 
   if (do_log) then
@@ -1801,7 +1747,7 @@ end subroutine get_param_int
 !! and logs them in documentation files.
 subroutine get_param_int_array(CS, modulename, varname, value, desc, units, &
                default, defaults, fail_if_missing, do_not_read, do_not_log, &
-               layoutParam, debuggingParam, old_name)
+               layoutParam, debuggingParam)
   type(param_file_type),      intent(in)    :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),           intent(in)    :: modulename !< The name of the calling module
@@ -1823,15 +1769,8 @@ subroutine get_param_int_array(CS, modulename, varname, value, desc, units, &
                                          !! logged in the layout parameter file
   logical,          optional, intent(in)    :: debuggingParam !< If present and true, this parameter is
                                          !! logged in the debugging parameter file
-  character(len=*), optional, intent(in)    :: old_name !< A case-sensitive archaic name of the parameter
-                                         !! to read.  Errors or warnings are issued if the old name
-                                         !! is being used.
 
-  ! Local variables
   logical :: do_read, do_log
-  logical :: new_name_used, old_name_used, same_value
-  integer :: new_name_value(size(value))  ! The values that are set when the old name is used.
-  integer :: m
 
   do_read = .true. ; if (present(do_not_read)) do_read = .not.do_not_read
   do_log  = .true. ; if (present(do_not_log))  do_log  = .not.do_not_log
@@ -1846,24 +1785,7 @@ subroutine get_param_int_array(CS, modulename, varname, value, desc, units, &
   if (do_read) then
     if (present(default)) value(:) = default
     if (present(defaults)) value(:) = defaults(:)
-
-    old_name_used = .false.
-    if (present(old_name)) then
-      new_name_value(:) = value(:)
-      call read_param_int_array(CS, old_name, value, set=old_name_used)
-      if (old_name_used) then
-        call read_param_int_array(CS, varname, new_name_value, set=new_name_used)
-
-        ! Issue appropriate warnings or error messages.
-        same_value = .true.
-        do m=1,size(value) ; if (value(m) /= new_name_value(m)) same_value = .false. ; enddo
-        call archaic_param_name_message(varname, old_name, new_name_used, same_value)
-      endif
-    endif
-
-    if (.not.old_name_used) then ! Old name is either not present or not set.
-      call read_param_int_array(CS, varname, value, fail_if_missing)
-    endif
+    call read_param_int_array(CS, varname, value, fail_if_missing)
   endif
 
   if (do_log) then
@@ -1877,7 +1799,7 @@ end subroutine get_param_int_array
 !! and logs it in documentation files.
 subroutine get_param_real(CS, modulename, varname, value, desc, units, &
                default, fail_if_missing, do_not_read, do_not_log, &
-               debuggingParam, scale, unscaled, old_name)
+               debuggingParam, scale, unscaled)
   type(param_file_type),      intent(in)    :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),           intent(in)    :: modulename !< The name of the calling module
@@ -1900,37 +1822,15 @@ subroutine get_param_real(CS, modulename, varname, value, desc, units, &
                                          !! multiplied by before it is returned.
   real,             optional, intent(out)   :: unscaled !< The value of the parameter that would be
                                          !! returned without any multiplication by a scaling factor.
-  character(len=*), optional, intent(in)    :: old_name !< A case-sensitive archaic name of the parameter
-                                         !! to read.  Errors or warnings are issued if the old name
-                                         !! is being used.
 
-  ! Local variables
   logical :: do_read, do_log
-  logical :: new_name_used, old_name_used, same_value
-  real :: new_name_value  ! The value that is set when the old name is used.
 
   do_read = .true. ; if (present(do_not_read)) do_read = .not.do_not_read
   do_log  = .true. ; if (present(do_not_log))  do_log  = .not.do_not_log
 
   if (do_read) then
     if (present(default)) value = default
-
-    old_name_used = .false.
-    if (present(old_name)) then
-      new_name_value = value
-      call read_param_real(CS, old_name, value, set=old_name_used)
-      if (old_name_used) then
-        call read_param_real(CS, varname, new_name_value, set=new_name_used)
-
-        ! Issue appropriate warnings or error messages.
-        same_value = (new_name_used .and. old_name_used .and. (value == new_name_value))
-        call archaic_param_name_message(varname, old_name, new_name_used, same_value)
-      endif
-    endif
-
-    if (.not.old_name_used) then ! Old name is either not present or not set.
-      call read_param_real(CS, varname, value, fail_if_missing)
-    endif
+    call read_param_real(CS, varname, value, fail_if_missing)
   endif
 
   if (do_log) then
@@ -1947,7 +1847,7 @@ end subroutine get_param_real
 !! and logs them in documentation files.
 subroutine get_param_real_array(CS, modulename, varname, value, desc, units, &
                default, defaults, fail_if_missing, do_not_read, do_not_log, debuggingParam, &
-               scale, unscaled, old_name)
+               scale, unscaled)
   type(param_file_type),      intent(in)    :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),           intent(in)    :: modulename !< The name of the calling module
@@ -1971,15 +1871,8 @@ subroutine get_param_real_array(CS, modulename, varname, value, desc, units, &
                                          !! multiplied by before it is returned.
   real, dimension(:), optional, intent(out) :: unscaled !< The value of the parameter that would be
                                          !! returned without any multiplication by a scaling factor.
-  character(len=*), optional, intent(in)    :: old_name !< A case-sensitive archaic name of the parameter
-                                         !! to read.  Errors or warnings are issued if the old name
-                                         !! is being used.
 
-  ! Local variables
   logical :: do_read, do_log
-  logical :: new_name_used, old_name_used, same_value
-  real    :: new_name_value(size(value))  ! The values that are set when the standard name is used.
-  integer :: m
 
   do_read = .true. ; if (present(do_not_read)) do_read = .not.do_not_read
   do_log  = .true. ; if (present(do_not_log))  do_log  = .not.do_not_log
@@ -1994,24 +1887,7 @@ subroutine get_param_real_array(CS, modulename, varname, value, desc, units, &
   if (do_read) then
     if (present(default)) value(:) = default
     if (present(defaults)) value(:) = defaults(:)
-
-    old_name_used = .false.
-    if (present(old_name)) then
-      new_name_value(:) = value(:)
-      call read_param_real_array(CS, old_name, value, set=old_name_used)
-      if (old_name_used) then
-        call read_param_real_array(CS, varname, new_name_value, set=new_name_used)
-
-        ! Issue appropriate warnings or error messages.
-        same_value = .true.
-        do m=1,size(value) ; if (value(m) /= new_name_value(m)) same_value = .false. ; enddo
-        call archaic_param_name_message(varname, old_name, new_name_used, same_value)
-      endif
-    endif
-
-    if (.not.old_name_used) then ! Old name is either not present or not set.
-      call read_param_real_array(CS, varname, value, fail_if_missing)
-    endif
+    call read_param_real_array(CS, varname, value, fail_if_missing)
   endif
 
   if (do_log) then
@@ -2028,7 +1904,7 @@ end subroutine get_param_real_array
 !! and logs it in documentation files.
 subroutine get_param_char(CS, modulename, varname, value, desc, units, &
                default, fail_if_missing, do_not_read, do_not_log, &
-               layoutParam, debuggingParam, old_name)
+               layoutParam, debuggingParam)
   type(param_file_type),      intent(in)    :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),           intent(in)    :: modulename !< The name of the calling module
@@ -2049,37 +1925,15 @@ subroutine get_param_char(CS, modulename, varname, value, desc, units, &
                                          !! logged in the layout parameter file
   logical,          optional, intent(in)    :: debuggingParam !< If present and true, this parameter is
                                          !! logged in the debugging parameter file
-  character(len=*), optional, intent(in)    :: old_name !< A case-sensitive archaic name of the parameter
-                                         !! to read.  Errors or warnings are issued if the old name
-                                         !! is being used.
 
-  ! Local variables
   logical :: do_read, do_log
-  logical :: new_name_used, old_name_used, same_value
-  character(len=:), allocatable :: new_name_value  ! The value that is set when the standard name is used.
 
   do_read = .true. ; if (present(do_not_read)) do_read = .not.do_not_read
   do_log  = .true. ; if (present(do_not_log))  do_log  = .not.do_not_log
 
   if (do_read) then
     if (present(default)) value = default
-
-    old_name_used = .false.
-    if (present(old_name)) then
-      new_name_value = value
-      call read_param_char(CS, old_name, value, set=old_name_used)
-      if (old_name_used) then
-        call read_param_char(CS, varname, new_name_value, set=new_name_used)
-
-        ! Issue appropriate warnings or error messages.
-        same_value = (trim(value) == trim(new_name_value))
-        call archaic_param_name_message(varname, old_name, new_name_used, same_value)
-      endif
-    endif
-
-    if (.not.old_name_used) then ! Old name is either not present or not set.
-      call read_param_char(CS, varname, value, fail_if_missing)
-    endif
+    call read_param_char(CS, varname, value, fail_if_missing)
   endif
 
   if (do_log) then
@@ -2092,7 +1946,7 @@ end subroutine get_param_char
 !> This subroutine reads the values of an array of character string model parameters
 !! from a parameter file and logs them in documentation files.
 subroutine get_param_char_array(CS, modulename, varname, value, desc, units, &
-               default, fail_if_missing, do_not_read, do_not_log, old_name)
+               default, fail_if_missing, do_not_read, do_not_log)
   type(param_file_type),      intent(in)    :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),           intent(in)    :: modulename !< The name of the calling module
@@ -2109,40 +1963,18 @@ subroutine get_param_char_array(CS, modulename, varname, value, desc, units, &
                                          !! value for this parameter, although it might be logged.
   logical,          optional, intent(in)    :: do_not_log !< If present and true, do not log this
                                          !! parameter to the documentation files
-  character(len=*), optional, intent(in)    :: old_name !< A case-sensitive archaic name of the parameter
-                                         !! to read.  Errors or warnings are issued if the old name
-                                         !! is being used.
 
   ! Local variables
   logical :: do_read, do_log
-  logical :: new_name_used, old_name_used, same_value
-  integer :: i, m, len_tot, len_val
+  integer :: i, len_tot, len_val
   character(len=:), allocatable :: cat_val
-  character(len=:), allocatable :: new_name_value(:)  ! The value that is set when the standard name is used.
 
   do_read = .true. ; if (present(do_not_read)) do_read = .not.do_not_read
   do_log  = .true. ; if (present(do_not_log))  do_log  = .not.do_not_log
 
   if (do_read) then
     if (present(default)) value(:) = default
-
-    old_name_used = .false.
-    if (present(old_name)) then
-      new_name_value(:) = value(:)
-      call read_param_char_array(CS, old_name, value, set=old_name_used)
-      if (old_name_used) then
-        call read_param_char_array(CS, varname, new_name_value, set=new_name_used)
-
-        ! Issue appropriate warnings or error messages.
-        same_value = .true.
-        do m=1,size(value) ; if (trim(value(m)) /= trim(new_name_value(m))) same_value = .false. ; enddo
-        call archaic_param_name_message(varname, old_name, new_name_used, same_value)
-      endif
-    endif
-
-    if (.not.old_name_used) then ! Old name is either not present or not set.
-      call read_param_char_array(CS, varname, value, fail_if_missing)
-    endif
+    call read_param_char_array(CS, varname, value, fail_if_missing)
   endif
 
   if (do_log) then
@@ -2164,7 +1996,7 @@ end subroutine get_param_char_array
 !! and logs it in documentation files.
 subroutine get_param_logical(CS, modulename, varname, value, desc, units, &
                default, fail_if_missing, do_not_read, do_not_log, &
-               layoutParam, debuggingParam, old_name)
+               layoutParam, debuggingParam)
   type(param_file_type),      intent(in)    :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),           intent(in)    :: modulename !< The name of the calling module
@@ -2185,37 +2017,15 @@ subroutine get_param_logical(CS, modulename, varname, value, desc, units, &
                                          !! logged in the layout parameter file
   logical,          optional, intent(in)    :: debuggingParam !< If present and true, this parameter is
                                          !! logged in the debugging parameter file
-  character(len=*), optional, intent(in)    :: old_name !< A case-sensitive archaic name of the parameter
-                                         !! to read.  Errors or warnings are issued if the old name
-                                         !! is being used.
 
-  ! Local variables
   logical :: do_read, do_log
-  logical :: new_name_used, old_name_used, same_value
-  logical :: new_name_value  ! The value that is set when the standard name is used.
 
   do_read = .true. ; if (present(do_not_read)) do_read = .not.do_not_read
   do_log  = .true. ; if (present(do_not_log))  do_log  = .not.do_not_log
 
   if (do_read) then
     if (present(default)) value = default
-
-    old_name_used = .false.
-    if (present(old_name)) then
-      new_name_value = value
-      call read_param_logical(CS, old_name, value, set=old_name_used)
-      if (old_name_used) then
-        call read_param_logical(CS, varname, new_name_value, set=new_name_used)
-
-        ! Issue appropriate warnings or error messages.
-        same_value = (value .eqv. new_name_value)
-        call archaic_param_name_message(varname, old_name, new_name_used, same_value)
-      endif
-    endif
-
-    if (.not.old_name_used) then ! Old name is either not present or not set.
-      call read_param_logical(CS, varname, value, fail_if_missing)
-    endif
+    call read_param_logical(CS, varname, value, fail_if_missing)
   endif
 
   if (do_log) then
@@ -2230,7 +2040,7 @@ end subroutine get_param_logical
 subroutine get_param_time(CS, modulename, varname, value, desc, units, &
                           default, fail_if_missing, do_not_read, do_not_log, &
                           timeunit, layoutParam, debuggingParam, &
-                          log_as_date, old_name)
+                          log_as_date)
   type(param_file_type),      intent(in)    :: CS      !< The control structure for the file_parser module,
                                          !! it is also a structure to parse for run-time parameters
   character(len=*),           intent(in)    :: modulename !< The name of the calling module
@@ -2255,14 +2065,8 @@ subroutine get_param_time(CS, modulename, varname, value, desc, units, &
                                          !! logged in the debugging parameter file
   logical,          optional, intent(in)    :: log_as_date  !< If true, log the time_type in date
                                          !! format. The default is false.
-  character(len=*), optional, intent(in)    :: old_name !< A case-sensitive archaic name of the parameter
-                                         !! to read.  Errors or warnings are issued if the old name
-                                         !! is being used.
 
-  ! Local variables
   logical :: do_read, do_log, log_date
-  logical :: new_name_used, old_name_used, same_value
-  type(time_type) :: new_name_value  ! The value that is set when the standard name is used.
 
   do_read = .true. ; if (present(do_not_read)) do_read = .not.do_not_read
   do_log  = .true. ; if (present(do_not_log))  do_log  = .not.do_not_log
@@ -2270,23 +2074,7 @@ subroutine get_param_time(CS, modulename, varname, value, desc, units, &
 
   if (do_read) then
     if (present(default)) value = default
-
-    old_name_used = .false.
-    if (present(old_name)) then
-      new_name_value = value
-      call read_param_time(CS, old_name, value, timeunit, date_format=log_date, set=old_name_used)
-      if (old_name_used) then
-        call read_param_time(CS, varname, new_name_value, timeunit, date_format=log_date, set=new_name_used)
-
-        ! Issue appropriate warnings or error messages.
-        same_value = (value == new_name_value)
-        call archaic_param_name_message(varname, old_name, new_name_used, same_value)
-      endif
-    endif
-
-    if (.not.old_name_used) then ! Old name is either not present or not set.
-      call read_param_time(CS, varname, value, timeunit, fail_if_missing, date_format=log_date)
-    endif
+    call read_param_time(CS, varname, value, timeunit, fail_if_missing, date_format=log_date)
   endif
 
   if (do_log) then
@@ -2297,28 +2085,6 @@ subroutine get_param_time(CS, modulename, varname, value, desc, units, &
   endif
 
 end subroutine get_param_time
-
-!> Issue error messages or warnings about the use of an archaic parameter name.
-subroutine archaic_param_name_message(varname, old_name, new_name_used, same_value)
-  character(len=*), intent(in) :: varname  !< The case-sensitive name of the parameter to read
-  character(len=*), intent(in) :: old_name !< The case-sensitive archaic name of the parameter
-  logical,          intent(in) :: new_name_used  !< True if varname is used in the parameter file.
-  logical,          intent(in) :: same_value !< True if varname and old_name give the same values.
-
-  if (new_name_used .and. same_value) then
-    call MOM_error(WARNING, "The runtime parameter "//trim(varname)//&
-                 " is also being set consistently via its older name of "//trim(old_name)//&
-                 ".  Please migrate to only using "//trim(varname)//".")
-  elseif (new_name_used .and. .not.same_value) then
-    call MOM_error(FATAL, "The runtime parameter "//trim(varname)//&
-                 " is also being set inconsistently via its older name of "//trim(old_name)//&
-                 ".  Only use "//trim(varname)//".")
-  else
-    call MOM_error(WARNING, "The runtime parameter "//trim(varname)//&
-                   " is being set via its soon to be obsolete name of "//trim(old_name)//&
-                   ".  Please migrate to using "//trim(varname)//".")
-  endif
-end subroutine archaic_param_name_message
 
 ! -----------------------------------------------------------------------------
 

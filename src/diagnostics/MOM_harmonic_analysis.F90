@@ -9,11 +9,12 @@ use MOM_file_parser,   only : param_file_type, get_param
 use MOM_io,            only : file_exists, open_ASCII_file, READONLY_FILE, close_file, &
                               MOM_infra_file, vardesc, MOM_field, &
                               var_desc, create_MOM_file, SINGLE_FILE, MOM_write_field
-use MOM_error_handler, only : MOM_mesg, MOM_error, NOTE
+use MOM_error_handler, only : MOM_mesg, MOM_error, NOTE, FATAL, WARNING
 
 implicit none ; private
 
 public HA_init, HA_register, HA_accum_FtF, HA_accum_FtSSH
+public HA_init_edz, HA_register_edz, HA_accum_edz
 
 #include <MOM_memory.h>
 
@@ -31,11 +32,30 @@ type, private :: HA_type
   !>@}
 end type HA_type
 
+type, private :: HA_type_edz
+   ! Each HA fieldset should have its own FtF matrix in case the accumulators are called
+   ! on different timesteps.
+  character(len=16) :: key = "none"          !< Name of the field of which harmonic analysis is to be performed
+  character(len=1)  :: grid                  !< The grid on which the field is defined ('h', 'q', 'u', or 'v')
+  real :: old_time = -1.0                    !< The time of the previous accumulating step [T ~> s]
+  real, allocatable :: ref(:,:)              !< The initial field in arbitrary units [A]
+  real, allocatable :: FtSSH(:,:,:)          !< Accumulator of (F' * SSH_in) in arbitrary units [A]
+  real, allocatable :: FtF(:,:)               !< Accumulator of (F' * F) [nondimensional]
+  !>@{ Lower and upper bounds of input data
+  integer :: is, ie, js, je
+  !>@}
+end type HA_type_edz
+
 !> A linked list of control structures that store the HA info of different fields
 type, private :: HA_node
   type(HA_type)          :: this             !< Control structure of the current field in the list
   type(HA_node), pointer :: next             !< The list of other fields
 end type HA_node
+
+type, private :: HA_node_edz
+  type(HA_type_edz)          :: this             !< Control structure of the current field in the list
+  type(HA_node_edz), pointer :: next             !< The list of other fields
+end type HA_node_edz
 
 !> The public control structure of the MOM_harmonic_analysis module
 type, public :: harmonic_analysis_CS ; private
@@ -55,6 +75,23 @@ type, public :: harmonic_analysis_CS ; private
   type(unit_scale_type)  :: US               !< A dimensional unit scaling type
   type(HA_node), pointer :: list => NULL()   !< A linked list for storing the HA info of different fields
 end type harmonic_analysis_CS
+
+type, public :: harmonic_analysis_CS_edz ; private
+  logical :: HAready = .false.               !< If true, perform harmonic analysis
+  type(time_type) :: &
+    time_start, &                            !< Start time of harmonic analysis
+    time_end, &                              !< End time of harmonic analysis
+    time_ref                                 !< Reference time (t = 0) used to calculate tidal forcing
+  real, dimension(MAX_CONSTITUENTS) :: &
+    freq, &                                  !< The frequency of a tidal constituent [T-1 ~> s-1]
+    phase0                                   !< The phase of a tidal constituent at time 0 [rad]
+  integer :: nc                              !< The number of tidal constituents in use
+  integer :: length                          !< Number of fields of which harmonic analysis is to be performed
+  character(len=16)  :: const_name(MAX_CONSTITUENTS) !< The name of each constituent
+  character(len=255) :: path                 !< Path to directory where output will be written
+  type(unit_scale_type)  :: US               !< A dimensional unit scaling type
+  type(HA_node_edz), pointer :: list => NULL()   !< A linked list for storing the HA info of different fields
+end type harmonic_analysis_CS_edz
 
 contains
 
@@ -96,14 +133,12 @@ subroutine HA_init(Time, US, param_file, time_ref, nc, freq, phase0, const_name,
                  units="days", default=0.0, scale=86400.0*US%s_to_T)
 
   if (HA_end_time <= 0.0) then
-    call MOM_mesg('MOM_harmonic_analysis: HA_END_TIME is zero or negative. '//&
-                  'Harmonic analysis will not be performed.')
+    call MOM_error(FATAL,'MOM_harmonic_analysis: HA_END_TIME is zero or negative.')
     CS%HAready = .false. ; return
   endif
 
   if (HA_end_time <= HA_start_time) then
-    call MOM_mesg('MOM_harmonic_analysis: HA_END_TIME is smaller than or equal to HA_START_TIME. '//&
-                  'Harmonic analysis will not be performed.')
+    call MOM_error(FATAL,'MOM_harmonic_analysis: HA_END_TIME is smaller than or equal to HA_START_TIME.')
     CS%HAready = .false. ; return
   endif
 
@@ -131,6 +166,10 @@ subroutine HA_init(Time, US, param_file, time_ref, nc, freq, phase0, const_name,
   call get_param(param_file, mdl, "HA_PATH", CS%path, &
                  "Path to output files for runtime harmonic analysis.", default="./")
 
+  write(mesg,*) "MOM_harmonic_analysis: HA_PATH=",trim(CS%path)
+  call MOM_error(NOTE, trim(mesg))
+
+  
   ! Populate some parameters of the control structure
   CS%time_ref   =  time_ref
   CS%freq       =  freq
@@ -148,6 +187,97 @@ subroutine HA_init(Time, US, param_file, time_ref, nc, freq, phase0, const_name,
   nullify(CS%list%next)
 
 end subroutine HA_init
+
+subroutine HA_init_edz(Time, US, param_file, time_ref, nc, freq, phase0, const_name, CS)
+  type(time_type),       intent(in)  :: Time        !< The current model time
+  type(time_type),       intent(in)  :: time_ref    !< Reference time (t = 0) used to calculate tidal forcing
+  type(unit_scale_type), intent(in)  :: US          !< A dimensional unit scaling type
+  type(param_file_type), intent(in)  :: param_file  !< A structure to parse for run-time parameters
+  real, dimension(MAX_CONSTITUENTS), intent(in) :: freq   !< The frequency of a tidal constituent [T-1 ~> s-1]
+  real, dimension(MAX_CONSTITUENTS), intent(in) :: phase0 !< The phase of a tidal constituent at time 0 [rad]
+  integer,               intent(in)  :: nc          !< The number of tidal constituents in use
+  character(len=16),     intent(in)  :: const_name(MAX_CONSTITUENTS) !< The name of each constituent
+  type(harmonic_analysis_CS_edz), intent(out) :: CS     !< Control structure of the MOM_harmonic_analysis module
+
+  ! Local variables
+  type(HA_type_edz) :: ha1                              !< A temporary, null field used for initializing CS%list
+  real :: HA_start_time                             !< Start time of harmonic analysis [T ~> s]
+  real :: HA_end_time                               !< End time of harmonic analysis [T ~> s]
+  character(len=40)  :: mdl="MOM_harmonic_analysis" !< This module's name
+  character(len=255) :: mesg
+  integer :: year, month, day, hour, minute, second
+
+  ! Determine CS%time_start and CS%time_end
+  call get_param(param_file, mdl, "HA_START_TIME", HA_start_time, &
+                 "Start time of harmonic analysis, in units of days after "//&
+                 "the start of the current run segment. Must be smaller than "//&
+                 "HA_END_TIME, otherwise harmonic analysis will not be performed. "//&
+                 "If negative, |HA_START_TIME| determines the length of harmonic analysis, "//&
+                 "and harmonic analysis will start |HA_START_TIME| days before HA_END_TIME, "//&
+                 "or at the beginning of the run segment, whichever occurs later.", &
+                 units="days", default=0.0, scale=86400.0*US%s_to_T)
+  call get_param(param_file, mdl, "HA_END_TIME", HA_end_time, &
+                 "End time of harmonic analysis, in units of days after "//&
+                 "the start of the current run segment. Must be positive "//&
+                 "and smaller than the length of the currnet run segment, "//&
+                 "otherwise harmonic analysis will not be performed.", &
+                 units="days", default=0.0, scale=86400.0*US%s_to_T)
+
+  if (HA_end_time <= 0.0) then
+    call MOM_error(FATAL,'MOM_harmonic_analysis: HA_END_TIME is zero or negative.')
+    CS%HAready = .false. ; return
+  endif
+
+  if (HA_end_time <= HA_start_time) then
+    call MOM_error(FATAL,'MOM_harmonic_analysis: HA_END_TIME is smaller than or equal to HA_START_TIME.')
+    CS%HAready = .false. ; return
+  endif
+
+  CS%HAready = .true.
+
+  if (HA_start_time < 0.0) then
+    HA_start_time = HA_end_time + HA_start_time
+    if (HA_start_time <= 0.0) HA_start_time = 0.0
+  endif
+
+  CS%time_start = Time + real_to_time(US%T_to_s * HA_start_time)
+  CS%time_end = Time + real_to_time(US%T_to_s * HA_end_time)
+
+  call get_date(Time, year, month, day, hour, minute, second)
+  write(mesg,*) "MOM_harmonic_analysis edz: run segment starts on ", year, month, day, hour, minute, second
+  call MOM_error(NOTE, trim(mesg))
+  call get_date(CS%time_start, year, month, day, hour, minute, second)
+  write(mesg,*) "MOM_harmonic_analysis edz: harmonic analysis starts on ", year, month, day, hour, minute, second
+  call MOM_error(NOTE, trim(mesg))
+  call get_date(CS%time_end, year, month, day, hour, minute, second)
+  write(mesg,*) "MOM_harmonic_analysis edz: harmonic analysis ends on ", year, month, day, hour, minute, second
+  call MOM_error(NOTE, trim(mesg))
+
+  ! Set path to directory where output will be written
+  call get_param(param_file, mdl, "HA_PATH", CS%path, &
+                 "Path to output files for runtime harmonic analysis.", default="./")
+
+  write(mesg,*) "MOM_harmonic_analysis edz: HA_PATH=",trim(CS%path)
+  call MOM_error(NOTE, trim(mesg))
+
+
+  ! Populate some parameters of the control structure
+  CS%time_ref   =  time_ref
+  CS%freq       =  freq
+  CS%phase0     =  phase0
+  CS%nc         =  nc
+  CS%const_name =  const_name
+  CS%length     =  0
+  CS%US         =  US
+
+!  allocate(CS%FtF(2*nc+1,2*nc+1), source=0.0)
+
+  ! Initialize CS%list
+  allocate(CS%list)
+  CS%list%this  =  ha1
+  nullify(CS%list%next)
+
+end subroutine HA_init_edz
 
 !> This subroutine registers each of the fields on which HA is to be performed.
 subroutine HA_register(key, grid, CS)
@@ -170,6 +300,29 @@ subroutine HA_register(key, grid, CS)
   CS%length =  CS%length + 1
 
 end subroutine HA_register
+
+subroutine HA_register_edz(key, grid, CS)
+  ! Identical to HA_register except for _edz types used.
+  character(len=*),           intent(in)    :: key     !< Name of the current field
+  character(len=1),           intent(in)    :: grid    !< The grid on which the key field is defined
+  type(harmonic_analysis_CS_edz), intent(inout) :: CS      !< Control structure of the MOM_harmonic_analysis module
+
+  ! Local variables
+  type(HA_type_edz)          :: ha1                        !< Control structure for the current field
+  type(HA_node_edz), pointer :: tmp                        !< A temporary list to hold the current field
+
+  if (.not. CS%HAready) return
+
+  allocate(tmp)
+  ha1%key   =  trim(key)
+  ha1%grid  =  trim(grid)
+  tmp%this  =  ha1
+  tmp%next  => CS%list
+  CS%list   => tmp
+  CS%length =  CS%length + 1
+
+end subroutine HA_register_edz
+
 
 !> This subroutine accumulates the temporal basis functions in FtF.
 !! The tidal constituents are those used in MOM_tidal_forcing, plus the mean (of zero frequency).
@@ -314,6 +467,131 @@ subroutine HA_accum_FtSSH(key, data, Time, G, CS)
 
 end subroutine HA_accum_FtSSH
 
+! This version accumulates both FtF and FtSSH at the same time:
+subroutine HA_accum_edz(key, data, Time, G, CS)
+  character(len=*),           intent(in) :: key  !< Name of the current field
+  real, dimension(:,:),       intent(in) :: data !< Input data of which harmonic analysis is to be performed [A]
+  type(time_type),            intent(in) :: Time !< The current model time
+  type(ocean_grid_type),      intent(in) :: G    !< The ocean's grid structure
+  type(harmonic_analysis_CS_edz), intent(inout) :: CS   !< Control structure of the MOM_harmonic_analysis module
+
+  ! Local variables
+  type(HA_type_edz), pointer :: ha1
+  type(HA_node_edz), pointer :: tmp
+  real :: now                                    !< The relative time compared with the tidal reference [T ~> s]
+  real :: dt                                     !< The current time step size of the accumulator [T ~> s]
+  real :: cosomegat, sinomegat                   !< The components of the phase [nondim]
+  real :: ccosomegat, ssinomegat                   !< The components of the phase [nondim]
+  integer :: nc, i, j, k, c, icos, isin, is, ie, js, je
+  integer :: cc, iccos, issin
+  character(len=128) :: mesg
+
+  ! Exit the accumulator in the following cases
+  if (.not. CS%HAready) return
+  if (CS%length == 0) return
+  if (Time < CS%time_start) return
+  if (Time > CS%time_end) return
+
+  ! Loop through the full list to find the current field
+  tmp => CS%list
+  do k=1,CS%length
+    ha1 => tmp%this
+    if (trim(key) == trim(ha1%key)) exit
+    if (k == CS%length) then
+       call MOM_error(FATAL, &
+            "MOM_harmonic_analysis.F90: HA key not found")
+       return !< Do not perform harmonic analysis of a field that is not registered
+    end if
+    tmp => tmp%next
+  enddo
+
+  nc  = CS%nc
+  now = CS%US%s_to_T * time_type_to_real(Time - CS%time_ref)
+
+  ! Additional processing at the initial accumulating step
+  if (ha1%old_time < 0.0) then
+    ha1%old_time = now
+
+    write(mesg,*) "MOM_harmonic_analysis: initializing accumulator, key = ", trim(ha1%key)
+    call MOM_error(NOTE, trim(mesg))
+
+    ! Get the lower and upper bounds of input data
+    ha1%is = LBOUND(data,1) ; is = ha1%is
+    ha1%ie = UBOUND(data,1) ; ie = ha1%ie
+    ha1%js = LBOUND(data,2) ; js = ha1%js
+    ha1%je = UBOUND(data,2) ; je = ha1%je
+
+    allocate(ha1%ref(is:ie,js:je), source=0.0)
+    allocate(ha1%FtSSH(is:ie,js:je,2*nc+1), source=0.0)
+    allocate(ha1%FtF(2*nc+1,2*nc+1), source=0.0)
+    ha1%ref(:,:) = data(:,:)
+  endif
+
+  dt = now - ha1%old_time
+  ha1%old_time = now                        !< Keep track of time so we know when Time approaches CS%time_end
+
+  !< First entry, corresponding to the zero frequency constituent (mean)
+  ha1%FtF(1,1) = ha1%FtF(1,1) + 1.0
+
+  do c=1,nc
+    icos = 2*c
+    isin = 2*c+1
+    cosomegat = cos(CS%freq(c) * now + CS%phase0(c))
+    sinomegat = sin(CS%freq(c) * now + CS%phase0(c))
+
+    ! First column, corresponding to the zero frequency constituent (mean)
+    ha1%FtF(icos,1) = ha1%FtF(icos,1) + cosomegat
+    ha1%FtF(isin,1) = ha1%FtF(isin,1) + sinomegat
+
+    do cc=1,c
+      iccos = 2*cc
+      issin = 2*cc+1
+      ccosomegat = cos(CS%freq(cc) * now + CS%phase0(cc))
+      ssinomegat = sin(CS%freq(cc) * now + CS%phase0(cc))
+
+      ! Interior of the matrix, corresponding to the products of cosine and sine terms
+      ha1%FtF(icos,iccos) = ha1%FtF(icos,iccos) + cosomegat * ccosomegat
+      ha1%FtF(icos,issin) = ha1%FtF(icos,issin) + cosomegat * ssinomegat
+      ha1%FtF(isin,iccos) = ha1%FtF(isin,iccos) + sinomegat * ccosomegat
+      ha1%FtF(isin,issin) = ha1%FtF(isin,issin) + sinomegat * ssinomegat
+    enddo ! cc=1,c
+  enddo ! c=1,nc
+  
+  is = ha1%is ; ie = ha1%ie ; js = ha1%js ; je = ha1%je
+
+  !< First entry, corresponding to the zero frequency constituent (mean)
+  do j=js,je ; do i=is,ie
+    ha1%FtSSH(i,j,1) = ha1%FtSSH(i,j,1) + (data(i,j) - ha1%ref(i,j))
+  enddo ; enddo
+
+  !< The remaining entries
+  do c=1,nc
+    icos = 2*c
+    isin = 2*c+1
+    cosomegat = cos(CS%freq(c) * now + CS%phase0(c))
+    sinomegat = sin(CS%freq(c) * now + CS%phase0(c))
+    do j=js,je ; do i=is,ie
+      ha1%FtSSH(i,j,icos) = ha1%FtSSH(i,j,icos) + (data(i,j) - ha1%ref(i,j)) * cosomegat
+      ha1%FtSSH(i,j,isin) = ha1%FtSSH(i,j,isin) + (data(i,j) - ha1%ref(i,j)) * sinomegat
+    enddo ; enddo
+  enddo ! c=1,nc
+
+  ! Compute harmonic constants and write output as Time approaches CS%time_end
+  ! This guarantees that HA_write will be called before Time becomes larger than CS%time_end
+  if (time_type_to_real(CS%time_end - Time) <= dt) then
+    call HA_write_edz(ha1, Time, G, CS)
+
+    write(mesg,*) "MOM_harmonic_analysis: harmonic analysis done, key = ", trim(ha1%key)
+    call MOM_error(NOTE, trim(mesg))
+
+    ! De-register the current field and deallocate memory
+    ha1%key = 'none'
+    deallocate(ha1%ref)
+    deallocate(ha1%FtSSH)
+  endif
+
+end subroutine HA_accum_edz
+
 !> This subroutine computes the harmonic constants and write output for the current field
 subroutine HA_write(ha1, Time, G, CS)
   type(HA_type), pointer,     intent(in) :: ha1    !< Control structure for the current field
@@ -325,7 +603,7 @@ subroutine HA_write(ha1, Time, G, CS)
   real, dimension(:,:,:), allocatable :: FtSSHw    !< An array containing the harmonic constants [A]
   integer :: year, month, day, hour, minute, second
   integer :: nc, i, j, k, is, ie, js, je
-
+  
   character(len=255)           :: filename         !< Output file name
   type(MOM_infra_file)         :: cdf              !< The file handle for output harmonic constants
   type(vardesc),   allocatable :: cdf_vars(:)      !< Output variable names
@@ -357,12 +635,12 @@ subroutine HA_write(ha1, Time, G, CS)
   call create_MOM_file(cdf, trim(filename), cdf_vars, &
                        2*nc+1, cdf_fields, SINGLE_FILE, 86400.0, G=G)
 
-  ! Add the initial field back to the mean state
-  do j=js,je ; do i=is,ie
-    FtSSHw(i,j,1) = FtSSHw(i,j,1) + ha1%ref(i,j)
-  enddo ; enddo
-
   ! Write data
+  do j=js,je
+     do i=is,ie
+        FtSSHw(i,j,1) = FtSSHw(i,j,1) + ha1%ref(i,j)
+     end do
+  end do
   call MOM_write_field(cdf, cdf_fields(1), G%domain, FtSSHw(:,:,1), 0.0)
   do k=1,nc
     call MOM_write_field(cdf, cdf_fields(2*k  ), G%domain, FtSSHw(:,:,2*k  ), 0.0)
@@ -439,6 +717,143 @@ subroutine HA_solver(ha1, nc, FtF, x)
   enddo
 
 end subroutine HA_solver
+
+!> This subroutine computes the harmonic constants and write output for the current field
+subroutine HA_write_edz(ha1, Time, G, CS)
+  type(HA_type_edz), pointer,     intent(in) :: ha1    !< Control structure for the current field
+  type(time_type),            intent(in) :: Time   !< The current model time
+  type(ocean_grid_type),      intent(in) :: G      !< The ocean's grid structure
+  type(harmonic_analysis_CS_edz), intent(in) :: CS     !< Control structure of the MOM_harmonic_analysis module
+
+  ! Local variables
+  real, dimension(:,:,:), allocatable :: FtSSHw    !< An array containing the harmonic constants [A]
+  integer :: year, month, day, hour, minute, second
+  integer :: i, j, nc, k, is, ie, js, je
+
+  character(len=255)           :: filename         !< Output file name
+  type(MOM_infra_file)         :: cdf              !< The file handle for output harmonic constants
+  type(vardesc),   allocatable :: cdf_vars(:)      !< Output variable names
+  type(MOM_field), allocatable :: cdf_fields(:)    !< Field type variables for the output fields
+
+  nc = CS%nc ; is = ha1%is ; ie = ha1%ie ; js = ha1%js ; je = ha1%je
+
+  allocate(FtSSHw(is:ie,js:je,2*nc+1), source=0.0)
+
+  ! Compute the harmonic coefficients
+  call HA_solver_edz(ha1, nc, FtSSHw)
+
+  ! Output file name
+  call get_date(Time, year, month, day, hour, minute, second)
+  write(filename, '(a,"HAedz_",a,i0.4,i0.2,i0.2,".nc")') &
+      trim(CS%path), trim(ha1%key), year, month, day
+
+  allocate(cdf_vars(2*nc+1))
+  allocate(cdf_fields(2*nc+1))
+
+  ! Variable names
+  cdf_vars(1) = var_desc("z0", "m" ,"mean value", ha1%grid, '1', '1')
+  do k=1,nc
+    cdf_vars(2*k  ) = var_desc(trim(CS%const_name(k))//"cos", "m", "cosine coefficient", ha1%grid, '1', '1')
+    cdf_vars(2*k+1) = var_desc(trim(CS%const_name(k))//"sin", "m", "sine coefficient", ha1%grid, '1', '1')
+  enddo
+
+  ! Create output file
+  call create_MOM_file(cdf, trim(filename), cdf_vars, &
+                       2*nc+1, cdf_fields, SINGLE_FILE, 86400.0, G=G)
+
+  ! Write data
+  do j=js,je
+     do i=is,ie
+        FtSSHw(i,j,1) = FtSSHw(i,j,1) + ha1%ref(i,j)
+     end do
+  end do
+  call MOM_write_field(cdf, cdf_fields(1), G%domain, FtSSHw(:,:,1), 0.0)
+  do k=1,nc
+    call MOM_write_field(cdf, cdf_fields(2*k  ), G%domain, FtSSHw(:,:,2*k  ), 0.0)
+    call MOM_write_field(cdf, cdf_fields(2*k+1), G%domain, FtSSHw(:,:,2*k+1), 0.0)
+  enddo
+
+  call cdf%flush()
+  deallocate(cdf_vars)
+  deallocate(cdf_fields)
+  deallocate(FtSSHw)
+
+end subroutine HA_write_edz
+
+!> This subroutine computes the harmonic constants (stored in x) using the dot products of the temporal
+!! basis functions accumulated in FtF, and the dot products of the SSH (or other fields) with the temporal basis
+!! functions accumulated in FtSSH. The system is solved by Cholesky decomposition,
+!!
+!!     FtF * x = FtSSH,    =>    L * (L' * x) = FtSSH,    =>    L * y = FtSSH,
+!!
+!! where L is the lower triangular matrix, y = L' * x, and x is the solution vector.
+!!
+subroutine HA_solver_edz(ha1, nc, x)
+  type(HA_type_edz), pointer,              intent(in)  :: ha1    !< Control structure for the current field
+  integer,                             intent(in)  :: nc     !< Number of harmonic constituents
+  real, dimension(:,:,:), allocatable, intent(out) :: x      !< Solution vector of harmonic constants [A]
+
+  ! Local variables
+  real :: tmp0                                !< Temporary variable for Cholesky decomposition [nondim]
+  real, dimension(:,:),   allocatable :: L    !< Lower triangular matrix of Cholesky decomposition [nondim]
+  real, dimension(:),     allocatable :: tmp1 !< Inverse of the diagonal entries of L [nondim]
+  real, dimension(:,:),   allocatable :: tmp2 !< 2D temporary array involving FtSSH [A]
+  real, dimension(:,:,:), allocatable :: y    !< 3D temporary array, i.e., L' * x [A]
+  integer :: k, m, n, is, ie, js, je
+
+  is = ha1%is ; ie = ha1%ie ; js = ha1%js ; je = ha1%je
+
+  allocate(L(1:2*nc+1,1:2*nc+1), source=0.0)
+  allocate(tmp1(1:2*nc+1), source=0.0)
+  allocate(tmp2(is:ie,js:je), source=0.0)
+  allocate(x(is:ie,js:je,2*nc+1), source=0.0)
+  allocate(y(is:ie,js:je,2*nc+1), source=0.0)
+
+  ! Cholesky decomposition
+  do m=1,2*nc+1
+
+    ! First, calculate the diagonal entries
+    tmp0 = 0.0
+    do k=1,m-1                             ! This loop operates along the m-th row
+      tmp0 = tmp0 + L(m,k) * L(m,k)
+    enddo
+    L(m,m) = sqrt(ha1%FtF(m,m) - tmp0)         ! This is the m-th diagonal entry
+
+    ! Now calculate the off-diagonal entries
+    tmp1(m) = 1 / L(m,m)
+    do k=m+1,2*nc+1                        ! This loop operates along the column below the m-th diagonal entry
+      tmp0 = 0.0
+      do n=1,m-1
+        tmp0 = tmp0 + L(k,n) * L(m,n)
+      enddo
+      L(k,m) = (ha1%FtF(k,m) - tmp0) * tmp1(m) ! This is the k-th off-diagonal entry below the m-th diagonal entry
+    enddo
+  enddo
+
+  ! Solve for y from L * y = FtSSH
+  do k=1,2*nc+1
+    tmp2(:,:) = 0.0
+    do m=1,k-1
+      tmp2(:,:) = tmp2(:,:) + L(k,m) * y(:,:,m)
+    enddo
+    y(:,:,k) = (ha1%FtSSH(:,:,k) - tmp2(:,:)) * tmp1(k)
+  enddo
+
+  ! Solve for x from L' * x = y
+  do k=2*nc+1,1,-1
+    tmp2(:,:) = 0.0
+    do m=k+1,2*nc+1
+      tmp2(:,:) = tmp2(:,:) + L(m,k) * x(:,:,m)
+    enddo
+    x(:,:,k) = (y(:,:,k) - tmp2(:,:)) * tmp1(k)
+  enddo
+
+  deallocate(tmp1)
+  deallocate(tmp2)
+  deallocate(L)
+  deallocate(y)
+
+end subroutine HA_solver_edz
 
 !> \namespace harmonic_analysis
 !!

@@ -1514,7 +1514,8 @@ subroutine initialize_dyn_split_RK2(u, v, h, tv, uh, vh, eta, Time, G, GV, US, p
     HA_CSp => CS%HA_CSp
     HA_CSp_edz => CS%HA_CSp_edz
   else
-    HA_CSp => NULL()
+     HA_CSp => NULL()
+     HA_CSp_edz => NULL()
   endif
   call PressureForce_init(Time, G, GV, US, param_file, diag, CS%PressureForce_CSp, &
                           CS%SAL_CSp, CS%tides_CSp)

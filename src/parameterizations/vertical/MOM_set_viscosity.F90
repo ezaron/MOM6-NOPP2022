@@ -74,6 +74,7 @@ type, public :: set_visc_CS ; private
                             !! actual velocity in the bottommost `HBBL`, depending
                             !! on whether linear_drag is true.
                             !! Runtime parameter `BOTTOMDRAGLAW`.
+  logical :: bottomdragmap  !< If true, a spatially varying scaling factor is applied to cdrag.
   logical :: body_force_drag !< If true, the bottom stress is imposed as an explicit body force
                             !! applied over a fixed distance from the bottom, rather than as an
                             !! implicit calculation based on an enhanced near-bottom viscosity.
@@ -117,6 +118,8 @@ type, public :: set_visc_CS ; private
                             !! regulate the timing of diagnostic output.
   ! Allocatable data arrays
   real, allocatable, dimension(:,:) :: tideamp !< RMS tidal amplitude at h points [Z T-1 ~> m s-1]
+  real, allocatable, dimension(:,:) :: bottom_drag_u !< A spatially varying scaling factor applied to cdrag [nondim]
+  real, allocatable, dimension(:,:) :: bottom_drag_v !< A spatially varying scaling factor applied to cdrag [nondim]
   ! Diagnostic arrays
   real, allocatable, dimension(:,:) :: bbl_u !< BBL mean U current [L T-1 ~> m s-1]
   real, allocatable, dimension(:,:) :: bbl_v !< BBL mean V current [L T-1 ~> m s-1]
@@ -645,6 +648,11 @@ subroutine set_viscous_BBL(u, v, h, tv, visc, G, GV, US, CS, pbv)
           ustar(i) = cdrag_sqrt_H_RL * hutot / SpV_htot
         else ! (.not.CS%linear_drag .and. .not.allocated(tv%SpV_avg))
           ustar(i) = cdrag_sqrt_H * hutot / hwtot
+        endif
+
+        if (CS%bottomdragmap) then
+          if (m==1) ustar(i) = ustar(i) * CS%bottom_drag_u(I,j)
+          if (m==2) ustar(i) = ustar(i) * CS%bottom_drag_v(i,J)
         endif
 
         umag_avg(i) = hutot * I_hwtot
@@ -2885,6 +2893,7 @@ subroutine set_visc_init(Time, G, GV, US, param_file, diag, visc, CS, restart_CS
                              ! is used in place of the absolute value of the local Coriolis
                              ! parameter in the denominator of some expressions [nondim]
   real    :: Chan_max_thick_dflt ! The default value for CHANNEL_DRAG_MAX_THICK [Z ~> m]
+  real, allocatable :: bottom_drag_h(:,:)  ! A spatially varying bottom drag scaling factor at tracer points [nondim]
 
   integer :: i, j, k, is, ie, js, je
   integer :: isd, ied, jsd, jed, IsdB, IedB, JsdB, JedB, nz
@@ -2897,6 +2906,8 @@ subroutine set_visc_init(Time, G, GV, US, param_file, diag, visc, CS, restart_CS
   logical :: use_EOS         ! If true, density calculated from T & S using an equation of state.
   character(len=200) :: filename, tideamp_file ! Input file names or paths
   character(len=80)  :: tideamp_var ! Input file variable names
+  character(len=200) :: bottom_drag_file ! The file from which to read the spatially varying bottom drag.
+  character(len=80)  :: bottom_drag_var  ! The spatially varying bottom drag variable name in bottom_drag_file.
   ! This include declares and sets the variable "version".
 # include "version_variable.h"
   character(len=40)  :: mdl = "MOM_set_visc"  ! This module's name.
@@ -2955,6 +2966,17 @@ subroutine set_visc_init(Time, G, GV, US, param_file, diag, visc, CS, restart_CS
   if (.not.adiabatic) then
     CS%RiNo_mix = kappa_shear_is_used(param_file)
   endif
+
+  call get_param(param_file, mdl, "BOTTOMDRAGMAP", CS%bottomdragmap, &
+                 "If true, the bottom stress is scaled by a spatially varying "//&
+                 "scaling factor set by bottom_drag_u & _v.", default=.false.)
+  call get_param(param_file, mdl, "BOTTOM_DRAG_FILE", bottom_drag_file, &
+                 "The name of the file with the spatially varying bottom drag "//&
+                 "scaling factor.", default="", do_not_log=.not.CS%bottomdragmap)
+  call get_param(param_file, mdl, "BOTTOM_DRAG_VAR", bottom_drag_var, &
+                 "The name of the variable in BOTTOM_DRAG_FILE with the "//&
+                 "spatially varying bottom drag scaling factor at h points.", &
+                 default="", do_not_log=.not.CS%bottomdragmap)
 
   call get_param(param_file, mdl, "PRANDTL_TURB", visc%Prandtl_turb, &
                  "The turbulent Prandtl number applied to shear "//&
@@ -3159,6 +3181,7 @@ subroutine set_visc_init(Time, G, GV, US, param_file, diag, visc, CS, restart_CS
     if (CS%id_bbl_v>0) then
       allocate(CS%bbl_v(isd:ied,JsdB:JedB), source=0.0)
     endif
+
     if (CS%BBL_use_tidal_bg) then
       allocate(CS%tideamp(isd:ied,jsd:jed), source=0.0)
       filename = trim(CS%inputdir) // trim(tideamp_file)
@@ -3166,7 +3189,28 @@ subroutine set_visc_init(Time, G, GV, US, param_file, diag, visc, CS, restart_CS
       call MOM_read_data(filename, tideamp_var, CS%tideamp, G%domain, scale=US%m_to_Z*US%T_to_s)
       call pass_var(CS%tideamp,G%domain)
     endif
-  endif
+
+    if (CS%bottomdragmap) then
+      allocate(CS%bottom_drag_u(IsdB:IedB,jsd:jed), source=0.0)
+      allocate(CS%bottom_drag_v(isd:ied,JsdB:JedB), source=0.0)
+
+      if (len_trim(bottom_drag_file) > 0) then
+        allocate(bottom_drag_h(isd:ied,jsd:jed), source=0.0)
+        filename = trim(CS%inputdir) // trim(bottom_drag_file)
+        call log_param(param_file, mdl, "INPUTDIR/BOTTOM_DRAG_FILE", filename)
+        call MOM_read_data(filename, bottom_drag_var, bottom_drag_h, G%domain)
+        call pass_var(bottom_drag_h, G%domain)
+        do j=js,je ; do I=is-1,ie
+          CS%bottom_drag_u(I,j) = 0.5 * (bottom_drag_h(i,j) + bottom_drag_h(i+1,j))
+        enddo ; enddo
+        do J=js-1,je ; do i=is,ie
+          CS%bottom_drag_v(i,J) = 0.5 * (bottom_drag_h(i,j) + bottom_drag_h(i,j+1))
+        enddo ; enddo
+        deallocate(bottom_drag_h)
+      endif ! (len_trim(bottom_drag_file) > 0)
+    endif ! (CS%bottomdragmap)
+  endif ! (CS%bottomdraglaw)
+
   if (CS%Channel_drag .or. CS%body_force_drag) then
     allocate(visc%Ray_u(IsdB:IedB,jsd:jed,nz), source=0.0)
     allocate(visc%Ray_v(isd:ied,JsdB:JedB,nz), source=0.0)
@@ -3175,7 +3219,6 @@ subroutine set_visc_init(Time, G, GV, US, param_file, diag, visc, CS, restart_CS
     CS%id_Ray_v = register_diag_field('ocean_model', 'Rayleigh_v', diag%axesCvL, &
        Time, 'Rayleigh drag velocity at v points', 'm s-1', conversion=GV%H_to_m*US%s_to_T)
   endif
-
 
   if (CS%dynamic_viscous_ML) then
     allocate(visc%nkml_visc_u(IsdB:IedB,jsd:jed), source=0.0)
